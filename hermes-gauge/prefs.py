@@ -145,13 +145,130 @@ FIELDS = (
         "label": "Idle after (hours)",
         "help": "A conversation with no activity for this long is idle. It stays in the report when it is almost full.",
     },
+    {
+        "key": "memory.level",
+        "path": ("memory", "level"),
+        "type": "choice",
+        "default": "standard",
+        "choices": ["lean", "standard", "roomy"],
+        "label": "Memory level",
+        "help": (
+            "How strict /gauge setup is. lean flags early, standard is the usual "
+            "budget, roomy allows more. A limit set below wins over the level."
+        ),
+    },
+    {
+        "key": "memory.turn_tokens",
+        "path": ("memory", "turn_tokens"),
+        "type": "int",
+        "default": 2_000,
+        "min": 200,
+        "max": 50_000,
+        "label": "Per-block limit (tokens)",
+        "help": "MEMORY.md, USER.md, SOUL.md, the skill index, recall, AGENTS.md: each is pasted every turn. Over this, it is flagged.",
+    },
+    {
+        "key": "memory.fill_alert",
+        "path": ("memory", "fill_alert"),
+        "type": "ratio",
+        "default": 0.90,
+        "min": 0.50,
+        "max": 0.99,
+        "label": "Memory file full at",
+        "help": "Share of the Hermes character cap. Above it the next memory write can fail.",
+    },
+    {
+        "key": "memory.skill_warn_tokens",
+        "path": ("memory", "skill_warn_tokens"),
+        "type": "int",
+        "default": 15_000,
+        "min": 1_000,
+        "max": 500_000,
+        "label": "Long skill from (tokens)",
+        "help": "A skill of yours above this is reported as long.",
+    },
+    {
+        "key": "memory.skill_split_tokens",
+        "path": ("memory", "skill_split_tokens"),
+        "type": "int",
+        "default": 20_000,
+        "min": 1_000,
+        "max": 500_000,
+        "label": "Split a skill from (tokens)",
+        "help": "A skill of yours above this goes on the split plan: a short SKILL.md, the steps in references/. Not below the long-skill line.",
+    },
+    {
+        "key": "memory.unused_days",
+        "path": ("memory", "unused_days"),
+        "type": "int",
+        "default": 7,
+        "min": 1,
+        "max": 365,
+        "label": "Unused after (days)",
+        "help": "A skill not opened for this long is counted as unused. Needs skills/.usage.json.",
+    },
+    {
+        "key": "memory.review_mode",
+        "path": ("memory", "review_mode"),
+        "type": "choice",
+        "default": "report",
+        "choices": ["report", "split"],
+        "label": "Scheduled review",
+        "help": (
+            "report = the scheduled review writes a report and edits nothing. "
+            "split = it may split the skills on the split plan, and nothing else."
+        ),
+    },
+    {
+        "key": "memory.split_sources",
+        "path": ("memory", "split_sources"),
+        "type": "multi",
+        "default": ["own"],
+        "choices": ["own", "project"],
+        "label": "Split skills from",
+        "help": "own = under the Hermes skills folder. project = the project you named. Published and external skills are never split.",
+    },
+    {
+        "key": "memory.skip_categories",
+        "path": ("memory", "skip_categories"),
+        "type": "words",
+        "default": [],
+        "label": "Never split categories",
+        "help": "Skill categories (the folder above the skill) the review leaves alone, comma separated.",
+    },
 )
+
+# What each memory level stands for. A key the user writes wins over the level.
+MEMORY_LEVELS = {
+    "lean": {
+        "memory.turn_tokens": 1_500,
+        "memory.fill_alert": 0.80,
+        "memory.skill_warn_tokens": 8_000,
+        "memory.skill_split_tokens": 12_000,
+        "memory.unused_days": 5,
+    },
+    "standard": {
+        "memory.turn_tokens": 2_000,
+        "memory.fill_alert": 0.90,
+        "memory.skill_warn_tokens": 15_000,
+        "memory.skill_split_tokens": 20_000,
+        "memory.unused_days": 7,
+    },
+    "roomy": {
+        "memory.turn_tokens": 3_000,
+        "memory.fill_alert": 0.95,
+        "memory.skill_warn_tokens": 25_000,
+        "memory.skill_split_tokens": 35_000,
+        "memory.unused_days": 14,
+    },
+}
 
 FIELD_BY_KEY = {field["key"]: field for field in FIELDS}
 BASIC_KEYS = (
     "language", "thresholds.watch", "thresholds.full",
     "alerts.enabled", "alerts.on", "alerts.route",
 )
+_WORD = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
 _ALIASES = {
     "gauge.alerts.enabled": "alerts.enabled",
     "gauge.alerts.on": "alerts.on",
@@ -335,6 +452,49 @@ def _check_statuses(field, raw):
     return chosen
 
 
+def _split_list(raw):
+    if isinstance(raw, (list, tuple)):
+        return [str(item) for item in raw]
+    text = str(raw).strip()
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1]
+    return [part for part in re.split(r"[,\s]+", text) if part]
+
+
+def _check_multi(field, raw):
+    items = _split_list(raw)
+    if len(items) == 1 and items[0].strip().lower() in ("none", "off", "-"):
+        return []
+    chosen = []
+    for item in items:
+        name = item.strip().strip("'\"").lower()
+        if name not in field["choices"]:
+            raise _Invalid(
+                "invalid_choice",
+                f"{field['key']} accepts {', '.join(field['choices'])} (or none), not {item.strip()!r}.",
+            )
+        if name not in chosen:
+            chosen.append(name)
+    return chosen
+
+
+def _check_words(field, raw):
+    items = _split_list(raw)
+    if len(items) == 1 and items[0].strip().lower() in ("none", "off", "-"):
+        return []
+    chosen = []
+    for item in items:
+        name = item.strip().strip("'\"").lower()
+        if not _WORD.match(name):
+            raise _Invalid(
+                "invalid_name",
+                f"{field['key']} takes folder names (letters, digits, - _ .), not {item.strip()!r}.",
+            )
+        if name not in chosen:
+            chosen.append(name)
+    return chosen
+
+
 def _check_choice(field, raw):
     text = str(raw).strip().lower()
     if text not in field["choices"]:
@@ -359,6 +519,8 @@ _CHECKERS = {
     "int": _check_int,
     "bool": _check_bool,
     "statuses": _check_statuses,
+    "multi": _check_multi,
+    "words": _check_words,
     "choice": _check_choice,
     "route": _check_route,
 }
@@ -462,6 +624,21 @@ def view(path=None):
                 "code": "watch_not_below_full",
                 "message": "thresholds.watch must be below thresholds.full.",
             }
+    bundle = MEMORY_LEVELS.get(flat["memory.level"], MEMORY_LEVELS["standard"])
+    from_level = set()
+    for key, value in bundle.items():
+        if sources[key] == "default":
+            flat[key] = value
+            from_level.add(key)
+    if flat["memory.skill_split_tokens"] < flat["memory.skill_warn_tokens"]:
+        for key in ("memory.skill_warn_tokens", "memory.skill_split_tokens"):
+            flat[key] = bundle[key]
+            sources[key] = "default"
+            from_level.add(key)
+            invalid[key] = {
+                "code": "split_below_warn",
+                "message": "memory.skill_split_tokens must not be below memory.skill_warn_tokens.",
+            }
     for field in FIELDS:
         entry = {
             "key": field["key"],
@@ -477,7 +654,12 @@ def view(path=None):
                 entry[extra] = field[extra]
         if field["key"] in invalid:
             entry["invalid_in_file"] = invalid[field["key"]]
-        entry["group"] = "basic" if field["key"] in BASIC_KEYS else "advanced"
+        if field["key"] in from_level:
+            entry["from_level"] = flat["memory.level"]
+        if field["key"].startswith("memory."):
+            entry["group"] = "memory"
+        else:
+            entry["group"] = "basic" if field["key"] in BASIC_KEYS else "advanced"
         fields.append(entry)
     return {
         "ok": True,
@@ -490,6 +672,22 @@ def view(path=None):
     }
 
 
+def memory_limits(snapshot):
+    """The limits ``setup_audit.scan`` and the review brief use, from a ``view``."""
+    flat = snapshot["flat"]
+    return {
+        "level": flat["memory.level"],
+        "turn_tokens": flat["memory.turn_tokens"],
+        "fill_alert": flat["memory.fill_alert"],
+        "skill_warn_tokens": flat["memory.skill_warn_tokens"],
+        "skill_split_tokens": flat["memory.skill_split_tokens"],
+        "unused_days": flat["memory.unused_days"],
+        "review_mode": flat["memory.review_mode"],
+        "split_sources": list(flat["memory.split_sources"]),
+        "skip_categories": list(flat["memory.skip_categories"]),
+    }
+
+
 # --- writing --------------------------------------------------------------
 
 _KEY_LINE = re.compile(r"^(\s*)([A-Za-z0-9_.-]+)\s*:(.*)$")
@@ -499,7 +697,7 @@ def _literal(field, value):
     kind = field["type"]
     if kind == "bool":
         return "true" if value else "false"
-    if kind == "statuses":
+    if kind in ("statuses", "multi", "words"):
         return "[" + ", ".join(value) + "]"
     if kind == "route":
         return value if value in ("session", "home") else f'"{value}"'
@@ -650,6 +848,27 @@ def set_values(updates, path=None):
                 "code": "watch_not_below_full",
                 "message": "thresholds.watch must be below thresholds.full.",
             }
+    split_keys = ("memory.skill_warn_tokens", "memory.skill_split_tokens", "memory.level")
+    if not errors and any(key in chosen for key in split_keys):
+        level = chosen.get("memory.level", current["flat"]["memory.level"])
+        bundle = MEMORY_LEVELS.get(level, MEMORY_LEVELS["standard"])
+
+        def _resolved(key):
+            if key in chosen:
+                return chosen[key]
+            if current["sources"][key] == "file":
+                return current["flat"][key]
+            return bundle[key]
+
+        if _resolved("memory.skill_split_tokens") < _resolved("memory.skill_warn_tokens"):
+            key = next(
+                (item for item in ("memory.skill_split_tokens", "memory.skill_warn_tokens") if item in chosen),
+                "memory.skill_split_tokens",
+            )
+            errors[key] = {
+                "code": "split_below_warn",
+                "message": "memory.skill_split_tokens must not be below memory.skill_warn_tokens.",
+            }
     if not chosen and not errors:
         errors["_"] = {"code": "nothing_to_set", "message": "No setting was given."}
     if errors:
@@ -688,9 +907,16 @@ def parse_assignments(text):
 
 
 def display_value(field_key, value):
-    if field_key.startswith("thresholds."):
+    field = FIELD_BY_KEY.get(field_key) or {}
+    if field.get("type") == "ratio":
         number = round(float(value) * 100, 1)
         return f"{int(number) if number == int(number) else number} %"
+    if field.get("type") in ("multi", "words"):
+        return ", ".join(value) if value else "none"
+    if field_key in ("memory.turn_tokens", "memory.skill_warn_tokens", "memory.skill_split_tokens"):
+        return f"{value:,} tokens"
+    if field_key == "memory.unused_days":
+        return f"{value} days"
     if field_key == "alerts.enabled":
         return "on" if value else "off"
     if field_key == "alerts.on":
@@ -707,10 +933,12 @@ def render_view_text(snapshot):
     width = max(len(entry["key"]) for entry in snapshot["fields"])
     for entry in snapshot["fields"]:
         shown = display_value(entry["key"], entry["value"])
-        lines.append(f"{entry['key'].ljust(width)}  {shown}  ({entry['source']})")
+        source = f"level {entry['from_level']}" if entry.get("from_level") else entry["source"]
+        lines.append(f"{entry['key'].ljust(width)}  {shown}  ({source})")
     lines.extend([
         "",
         "Change one with: /gauge config set alerts.route=home",
+        "Memory budget: /gauge config set memory.level=lean (or standard, roomy).",
         "alerts.route: session (the thread the session lives in), home, or custom:<platform>:<chat_id>.",
         "Same file for Telegram and Desktop: hermes-gauge/config.yaml.",
     ])

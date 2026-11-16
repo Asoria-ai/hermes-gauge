@@ -255,3 +255,46 @@ def test_an_unwritable_target_reports_instead_of_raising(tmp_path):
     result = prefs.set_values({"output_reserve": 1}, blocked / "config.yaml")
     assert result["ok"] is False
     assert result["errors"]["_"]["code"] == "write_failed"
+
+
+def test_memory_limits_follow_the_level_and_a_written_key_wins(cfg):
+    limits = prefs.memory_limits(prefs.view(cfg))
+    assert limits["level"] == "standard"
+    assert limits["turn_tokens"] == 2_000
+    assert limits["review_mode"] == "report"
+    assert limits["split_sources"] == ["own"]
+
+    saved = prefs.set_values({"memory.level": "lean", "memory.turn_tokens": 1800}, cfg)
+    assert saved["ok"] is True, saved["errors"]
+    snapshot = prefs.view(cfg)
+    limits = prefs.memory_limits(snapshot)
+    assert limits["turn_tokens"] == 1_800
+    assert limits["skill_split_tokens"] == 12_000
+    entry = next(item for item in snapshot["fields"] if item["key"] == "memory.skill_split_tokens")
+    assert entry["from_level"] == "lean"
+    assert entry["group"] == "memory"
+    assert "(level lean)" in prefs.render_view_text(snapshot)
+
+
+def test_split_line_may_not_go_below_the_long_skill_line(cfg):
+    refused = prefs.set_values({"memory.skill_split_tokens": 5000}, cfg)
+    assert refused["ok"] is False
+    assert refused["errors"]["memory.skill_split_tokens"]["code"] == "split_below_warn"
+    both = prefs.set_values({"memory.skill_warn_tokens": 3000, "memory.skill_split_tokens": 5000}, cfg)
+    assert both["ok"] is True
+
+
+def test_split_sources_and_skipped_categories_are_lists(cfg):
+    saved = prefs.set_values({
+        "memory.split_sources": "own, project",
+        "memory.skip_categories": "DevOps research",
+        "memory.review_mode": "split",
+    }, cfg)
+    assert saved["ok"] is True, saved["errors"]
+    limits = prefs.memory_limits(prefs.view(cfg))
+    assert limits["split_sources"] == ["own", "project"]
+    assert limits["skip_categories"] == ["devops", "research"]
+    assert limits["review_mode"] == "split"
+    assert "skip_categories: [devops, research]" in cfg.read_text(encoding="utf-8")
+    assert prefs.validate("memory.split_sources", "published")[1]["code"] == "invalid_choice"
+    assert prefs.validate("memory.skip_categories", "../etc")[1]["code"] == "invalid_name"

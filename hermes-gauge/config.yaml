@@ -43,6 +43,29 @@ gauge:
     #   custom:<platform>:<chat_id>   one explicit chat, e.g. custom:telegram:-1001234567890
     # route: session
 
+# Memory and skills: what /gauge setup flags, and what the scheduled review
+# may do. The plugin measures and reports; it never edits a file itself.
+#
+# level picks every limit at once:
+#             per block  memory full  long skill  split from  unused after
+#   lean       1,500        80%         8,000       12,000       5 days
+#   standard   2,000        90%        15,000       20,000       7 days
+#   roomy      3,000        95%        25,000       35,000      14 days
+# A limit written below wins over the level. Uncomment one to set it.
+memory:
+  level: standard
+  # turn_tokens: 2000
+  # fill_alert: 0.90
+  # skill_warn_tokens: 15000
+  # skill_split_tokens: 20000
+  # unused_days: 7
+  # report: the scheduled review edits nothing.
+  # split:  it may split the skills on the split plan (yours, over the split
+  #         line, outside skip_categories). Published and external skills never.
+  review_mode: report
+  # split_sources: [own]          # own, project
+  # skip_categories: []           # e.g. [devops, research]
+
 # When the exchange gets dull. Safe defaults: observe and recommend.
 # The plugin never compacts a session and never starts a new one.
 # Compaction and the session cycle belong to Hermes core. This plugin
