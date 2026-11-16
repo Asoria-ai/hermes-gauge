@@ -534,6 +534,14 @@ The fill is an estimate unless the provider already counted tokens.
 - If detection fails, or compaction invalidated the anchor and no new measurement has arrived, the gauge shows **—** instead of guessing. A provider token count or a full transcript is a measurement; a reply, or half a reply from a broken stream, is not. The window that was already detected stays known across a summary. The fill never goes above 100% or below 0%.
 - The bar can still be wrong: this is not the model's tokenizer, a stream only counts what the hooks delivered, and a multi-agent subject is only as wide as its smallest window.
 
+## What's new in 0.7.0
+
+- **Numbered replies.** A WATCH or FULL notice ends with a list: 1 compact then new, 2 compact, 3 new, 4 stop. A leading digit is the answer even when words follow.
+- **One notice per burst.** Checks a few seconds apart are held and sent once, then that level stays quiet for a minute. A worse crossing still goes out.
+- **`/gauge setup`.** What Hermes pastes into context on every turn, with the cuts ranked by tokens saved.
+- **`/gauge review`.** A report-only brief, and `review schedule` for a nightly run. Only `review apply` may edit, and only your own skills.
+- **New tool `gauge_setup`.** The same checklist for an agent to call. No existing tool was renamed.
+
 ## Built for the Nous Research hackathon
 
 November 2026.
