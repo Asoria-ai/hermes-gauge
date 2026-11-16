@@ -4,7 +4,7 @@ manifest_version: 2
 api_version: 1
 requires_hermes: ">=0.22.3"
 description: Context gauge — see how full your agent's head is, per session and topic
-author: So Olivier
+author: Sébastien OLIVIER
 license: MIT
 tags: [context, gauge, dashboard, demo]
 # This file is the plugin. The standalone dashboard is not a tool, a hook,

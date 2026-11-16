@@ -6,7 +6,9 @@ Your AI agent never tells you its context is full. Now it does.
 
 > See how full your agent's head is.
 
-This plugin is the [Hermes Gauge context window gauge](https://hermes-gauge.sidelight.ch) for the Hermes agent. It is published by [Sidelight AI Consulting for Swiss firms](https://sidelight.ch).
+This plugin is the [Hermes Gauge context window gauge](http://hermes-gauge.asoria.ch/) for the Hermes agent. It is published by [Asoria - AI Consulting for swiss companies](https://asoria.ch).
+
+> **Name change.** Sidelight is now Asoria. The repository moved from `SidelightAi/hermes-gauge` to `Asoria-ai/hermes-gauge`, and the product page from `hermes-gauge.sidelight.ch` to `hermes-gauge.asoria.ch`. The plugin name, its tools and its data are unchanged. To follow the move in an existing clone: `git remote set-url origin https://github.com/Asoria-ai/hermes-gauge.git`.
 
 <p align="center"><img src="assets/dashboard-demo.png" alt="The demo dashboard: six fictional sessions, fullest first, two each in FULL, WATCH and OK" width="380"></p>
 
@@ -17,10 +19,10 @@ The demo dashboard (`make demo`) with its six fictional sessions. The plugin rea
 Hermes has to be installed already.
 
 ```bash
-hermes plugins install SidelightAi/hermes-gauge --enable
+hermes plugins install Asoria-ai/hermes-gauge --enable
 ```
 
-In Hermes Desktop: Capabilities → Plugins → Install from Git, with `SidelightAi/hermes-gauge`. Restart Hermes if it is already running. The longer install notes are further down.
+In Hermes Desktop: Capabilities → Plugins → Install from Git, with `Asoria-ai/hermes-gauge`. Restart Hermes if it is already running. The longer install notes are further down.
 
 ## Thirty seconds
 
@@ -414,7 +416,7 @@ The plugin alerts, recommends and measures. It never compacts a session or ends 
 
 ## Install notes
 
-`hermes plugins install SidelightAi/hermes-gauge --enable` clones [SidelightAi/hermes-gauge](https://github.com/SidelightAi/hermes-gauge) into `~/.hermes/plugins/`, runs the install scan, and turns the plugin on. A new session loads the tools. If Hermes is already running, restart it so the gateway picks the plugin up.
+`hermes plugins install Asoria-ai/hermes-gauge --enable` clones [Asoria-ai/hermes-gauge](https://github.com/Asoria-ai/hermes-gauge) into `~/.hermes/plugins/`, runs the install scan, and turns the plugin on. A new session loads the tools. If Hermes is already running, restart it so the gateway picks the plugin up.
 
 `--enable` answers the consent prompt. Without it, Hermes still clones the repo, then asks `Enable 'hermes-gauge' now?` and defaults to no. The tools stay unloaded until `hermes plugins enable hermes-gauge`.
 
@@ -536,6 +538,14 @@ The fill is an estimate unless the provider already counted tokens.
 
 November 2026.
 
+## Asoria
+
+[Asoria - AI Consulting for swiss companies](https://asoria.ch)
+
+- [hermes-gauge.asoria.ch](http://hermes-gauge.asoria.ch/)
+- [YouTube](https://www.youtube.com/@asoria_ai)
+- [X](https://x.com/asoria_ai)
+
 ## License
 
-MIT. So Olivier.
+MIT. Sébastien OLIVIER (ASORIA).
