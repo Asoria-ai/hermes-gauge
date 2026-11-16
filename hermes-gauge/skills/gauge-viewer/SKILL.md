@@ -44,9 +44,21 @@ The plugin ships in `audit`. It watches the effective window and recommends. It 
 
 ## Alert replies
 
-A WATCH or FULL push is one message. It names the conversation and its fill, says what to do, and carries the dull-threshold recommendation when that is due on the same turn. The message is plain text: no button tap reaches the agent.
+A WATCH, FULL, or dull-threshold push is one message. It names the conversation and its fill, says what to do, and ends with a numbered list. There is no button. A tap is not delivered to the agent, in Telegram or in the terminal, so the list in the message is the only control:
 
-When the user answers, call `gauge_action` with that action and the session id: `compact+new` (also `1`), `compact` (`2`), `new` (`3`), or `dismiss` (`rien`). `dismiss` records the choice and quiets that status until it changes. The other three hand `/compact` and `/new` to Hermes. If the tool returns `executed: false`, tell the user the exact command from `commands`. The gauge never compacts a transcript by itself.
+1. Compact, then new session
+2. Compact
+3. New session
+4. Stop these warnings
+Other: any other sentence is not a gauge choice
+
+The plugin posts that notice. Do not post it again and do not quote it back.
+
+A burst of checks is held for a few seconds. One notice goes out, the latest text, then nothing more at that level for a minute. `4`, `stop`, or `stop boring me` is `dismiss`: it records the choice and quiets that status until it changes. When the user answers with 1, 2, 3, or 4 — even with extra words, as in `1 compact and new` — call `gauge_action` with that number and the session id from the notice. That reply is the answer. Do not ask what they meant. Do not send a second menu, a widget, or "Reply skip". The list on the notice is English.
+
+`1`, `2`, and `3` hand `/compact` and `/new` to Hermes. If the tool returns `executed: false`, tell the user the exact command from `commands`. The gauge never compacts a transcript by itself.
+
+If you must ask about something that is not this notice, write the choices as a numbered list in the message and say to reply with the number, or with their own words. Do not use a control that needs a click.
 
 Read `policy_verdict` on `gauge_check` and `gauge_audit`: the dull threshold for this model and a short recommendation. `audit` pushes that recommendation once per crossing.
 

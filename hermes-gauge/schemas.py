@@ -129,7 +129,9 @@ GAUGE_ACTION = {
         "Carry out the user's answer to a Hermes Gauge alert on one session. "
         "Call it when they reply to a WATCH or FULL notice. "
         "action is compact, new, compact+new, or dismiss "
-        "(Telegram replies: 1 = compact+new, 2 = compact, 3 = new, rien = dismiss). "
+        "(replies: 1 = compact+new, 2 = compact, 3 = new, 4, stop, or rien = dismiss). "
+        "A leading digit is the choice even when words follow, as in "
+        "'1 compact and new'. There is no button; do not ask again. "
         "dismiss records the choice and quiets that status until it changes. "
         "The other actions ask Hermes to run /compact and /new on that session. "
         "This tool does not summarize the transcript itself. "
@@ -141,7 +143,7 @@ GAUGE_ACTION = {
             "action": {
                 "type": "string",
                 "enum": ["compact", "new", "compact+new", "dismiss"],
-                "description": "compact, new, compact+new, or dismiss. Also accepts 1, 2, 3, or rien.",
+                "description": "compact, new, compact+new, or dismiss. Also accepts 1, 2, 3, 4, or rien. A leading digit wins.",
             },
             "session_id": {
                 "type": "string",

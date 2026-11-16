@@ -98,6 +98,9 @@ _USAGE_EXTRA = (
     # alert and a dull recommendation can each fire once per crossing.
     ("dull_latched", "INTEGER NOT NULL DEFAULT 0"),
     ("dull_alerted_at", "REAL"),
+    # Last notice that actually left. A burst is held, then this blocks a repeat.
+    ("notice_sent_at", "REAL"),
+    ("notice_level", "INTEGER"),
 )
 
 # Added to ``recorded_turns`` in v0.5. ``created`` dates a turn so a fill curve
@@ -857,12 +860,22 @@ _ACTION_ALIASES = {
     "rien": "dismiss",
     "nothing": "dismiss",
     "dismiss": "dismiss",
+    "stop": "dismiss",
+    "quiet": "dismiss",
+    "enough": "dismiss",
+    "stopboringme": "dismiss",
 }
 
 
 def _normalize_action(action):
-    text = str(action or "").strip().lower().replace(" ", "")
-    return _ACTION_ALIASES.get(text)
+    """Map a reply to an action. A leading 1–4 wins, even with words after it.
+
+    ``1 compact and new`` is the menu choice, not a new question. ``10`` is not.
+    """
+    raw = str(action or "").strip().lower()
+    if raw[:1] in "1234" and not raw[1:2].isdigit():
+        return _ACTION_ALIASES[raw[:1]]
+    return _ACTION_ALIASES.get(raw.replace(" ", ""))
 
 
 def _active_language(explicit=None):
@@ -917,6 +930,15 @@ _ALERT_TEXT = {
             "SUMMARIZED": "Just summarized — measuring again.",
             "NO DATA": "Send your first message.",
         },
+        # No buttons: a tap is not delivered to the agent. The list is the control.
+        "menu": (
+            "Reply with a number:\n"
+            "1. Compact, then new session\n"
+            "2. Compact\n"
+            "3. New session\n"
+            "4. Stop these warnings\n"
+            "Other: write what you want."
+        ),
     },
     "fr": {
         "full": (
@@ -1188,13 +1210,175 @@ def _join_pushes(messages):
     return "\n\n".join(message for message in messages if message)
 
 
+# A burst of checks (a stream end, the usage hook, and a gauge_check a few
+# seconds apart) used to deliver one copy each. Hold them, send the latest,
+# then stay quiet. Tests set the wait to 0 so the send is still immediate.
+_NOTICE_WAIT_S = 5.0
+_NOTICE_QUIET_S = 60.0
+_NOTICE_LOCK = threading.Lock()
+_NOTICE_PENDING = {}
+
+
+def _notice_level(fields):
+    """FULL outranks a WATCH or dull notice, so a worse crossing is not swallowed."""
+    return 2 if (fields or {}).get("status") == "FULL" else 1
+
+
+def _notice_is_quiet(conn, session_id, level):
+    """True when this session was warned under a minute ago at this level or higher."""
+    try:
+        row = conn.execute(
+            "SELECT notice_sent_at, notice_level FROM usage WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+    except Exception:
+        return False
+    if not row or row[0] is None:
+        return False
+    try:
+        sent_at = float(row[0])
+        sent_level = int(row[1] or 1)
+    except (TypeError, ValueError):
+        return False
+    if time.time() - sent_at >= _NOTICE_QUIET_S:
+        return False
+    return int(level) <= sent_level
+
+
+def _stamp_notice(session_id, level):
+    conn = _db()
+    conn.execute(
+        "UPDATE usage SET notice_sent_at = ?, notice_level = ? WHERE session_id = ?",
+        (time.time(), int(level), session_id),
+    )
+    conn.commit()
+
+
+def _with_menu(message):
+    menu = _alert_copy("en")["menu"]
+    if menu in message:
+        return message
+    return f"{message}\n\n{menu}"
+
+
+def _render_notice(session_id, fields, include_alert):
+    """The text a notice would send, without claiming it."""
+    parts = []
+    if include_alert:
+        message = _alert_message(session_id, fields)
+        if message:
+            settings = gauge_math.alert_settings(load_config())
+            _parsed, _target, fallback = _route_target(settings["route"])
+            if fallback == "no_home_platform":
+                message = f"{message} {_alert_copy(_active_language())['home']}"
+            parts.append(message)
+    verdict = fields.get("policy_verdict") if isinstance(fields, dict) else None
+    if isinstance(verdict, dict) and verdict.get("dull_reached"):
+        lang = _active_language()
+        parts.append(gauge_math.policy_push_message(
+            _session_label(session_id, lang), verdict, gauge_math.resolve_policy(load_config()), lang,
+        ))
+    if not parts:
+        return None
+    return _with_menu(_join_pushes(parts))
+
+
+def _arm_notice(session_id, gen):
+    """Send now when the wait is 0, otherwise once the hold ends."""
+    delay = _NOTICE_WAIT_S
+    if delay <= 0:
+        _flush_notice(session_id, gen)
+        return
+    timer = threading.Timer(delay, _flush_notice, args=(session_id, gen))
+    timer.daemon = True
+    with _NOTICE_LOCK:
+        slot = _NOTICE_PENDING.get(session_id)
+        if slot is None or slot["gen"] != gen:
+            return
+        slot["timer"] = timer
+    timer.start()
+
+
+def _flush_notice(session_id, gen):
+    """Send the latest held notice, or put the claim back when the send fails."""
+    with _NOTICE_LOCK:
+        slot = _NOTICE_PENDING.get(session_id)
+        if slot is None or slot["gen"] != gen:
+            return
+        _NOTICE_PENDING.pop(session_id, None)
+    result = emit_hermes_notification(
+        slot["message"], session_id=session_id, route=slot["route"],
+    )
+    if not result or not result.get("sent"):
+        detail = "" if not isinstance(result, dict) else str(result.get("error") or result.get("channel") or "")
+        _log_hook(session_id, "alert_failed", detail[:300])
+        for _message, release, _route in slot["claims"]:
+            release()
+        return
+    _stamp_notice(session_id, slot["level"])
+
+
+def _refresh_notice(session_id, fields, alert):
+    """A later check in the same burst replaces the text. It does not send another copy."""
+    with _NOTICE_LOCK:
+        slot = _NOTICE_PENDING.get(session_id)
+        if slot is None:
+            return False
+        include_alert = bool(alert or slot["alert"] or (fields or {}).get("status") == "FULL")
+    text = _render_notice(session_id, fields, include_alert)
+    if not text:
+        return True
+    with _NOTICE_LOCK:
+        slot = _NOTICE_PENDING.get(session_id)
+        if slot is None:
+            return False
+        slot["message"] = text
+        slot["alert"] = include_alert
+        slot["level"] = max(slot["level"], _notice_level(fields))
+    return True
+
+
+def _hold_notice(session_id, message, route, claims, level, alert):
+    """Keep the latest notice for this session and arm one send."""
+    with _NOTICE_LOCK:
+        slot = _NOTICE_PENDING.get(session_id)
+        if slot is None:
+            gen = 1
+            _NOTICE_PENDING[session_id] = {
+                "message": message,
+                "route": route,
+                "claims": claims,
+                "level": level,
+                "alert": alert,
+                "gen": gen,
+                "timer": None,
+            }
+        else:
+            slot["message"] = message
+            slot["route"] = route
+            slot["claims"] = claims
+            slot["level"] = max(slot["level"], level)
+            slot["alert"] = bool(alert or slot["alert"])
+            gen = slot["gen"]
+            return message
+    _arm_notice(session_id, gen)
+    return message
+
+
 def _push_turn(conn, session_id, fields, alert=True):
     """Send at most one message for this turn: the status alert and the dull push together.
 
     A turn that crosses WATCH on a ``flash`` model used to post both, and each
-    twice when two hooks raced. Now both are claimed first, then sent as one.
-    Returns the message, or None.
+    twice when two hooks raced. Both are claimed first. A burst is held
+    (``_NOTICE_WAIT_S``, five seconds) and only the latest text is sent, then
+    nothing more at that level for a minute.
     """
+    if _refresh_notice(session_id, fields, alert):
+        with _NOTICE_LOCK:
+            slot = _NOTICE_PENDING.get(session_id)
+        return None if slot is None else slot["message"]
+    if _notice_is_quiet(conn, session_id, _notice_level(fields)):
+        return None
     claims = []
     if alert:
         claim = _claim_alert(conn, session_id, fields)
@@ -1206,16 +1390,10 @@ def _push_turn(conn, session_id, fields, alert=True):
         claims.append(policy)
     if not claims:
         return None
-    message = _join_pushes([item[0] for item in claims])
-    route = claims[0][2]
-    result = emit_hermes_notification(message, session_id=session_id, route=route)
-    if not result or not result.get("sent"):
-        detail = "" if not isinstance(result, dict) else str(result.get("error") or result.get("channel") or "")
-        _log_hook(session_id, "alert_failed", detail[:300])
-        for _message, release, _route in claims:
-            release()
-        return None
-    return message
+    message = _with_menu(_join_pushes([item[0] for item in claims]))
+    return _hold_notice(
+        session_id, message, claims[0][2], claims, _notice_level(fields), bool(alert),
+    )
 
 
 def _after_turn(session_id):
@@ -1430,6 +1608,12 @@ def _finish(conn, session_id, fields, usage, notify):
             "breakdown": fields.get("breakdown"),
         }
     if notify and usage is not None and session_id:
+        # Quiet before the status is claimed, so a dropped repeat can still fire
+        # once the minute is over. A notice already held just updates its text.
+        if _refresh_notice(session_id, fields, status in ("WATCH", "FULL")):
+            return fields
+        if _notice_is_quiet(conn, session_id, _notice_level(fields)):
+            return fields
         previous = usage.get("notified_status")
         message = _notify(conn, session_id, status, previous)
         fields["notification"] = message

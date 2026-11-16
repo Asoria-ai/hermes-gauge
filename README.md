@@ -185,10 +185,19 @@ A crossing sends one message on `alerts.route`, however many hooks saw it. The s
 ```text
 "release-review" is 92% full. Quality drops from here. Ask for a summary, then send /new and paste it. Hermes Gauge only watches; it never changes your chat.
 
-Hermes Gauge — session release-review : 92 % effectif, seuil débile 70 % : recommandé = compacter, puis nouvelle session.
+Hermes Gauge — session release-review: 92% effective, dull threshold 70%: recommended = compact, then new session.
+
+Reply with a number:
+1. Compact, then new session
+2. Compact
+3. New session
+4. Stop these warnings
+Other: write what you want.
 ```
 
-The recommendation line is in French. Two hooks that see the same turn (or two processes sharing the database) cannot both send: the crossing and the cooldown are each claimed with one conditional database update, and a send that fails releases the claim so the next turn retries. The message is text. `gauge_action` can record a reply (`compact`, `new`, `compact+new`, `dismiss`) and ask Hermes to run `/compact` and `/new`, but the plugin never compacts or starts a session itself.
+The recommendation follows the language setting. The reply list is always English. Checks that land a few seconds apart are held and sent once, as the latest text, then kept quiet for a minute. A worse crossing (WATCH, then FULL) still goes out. `4` or `stop` quiets that status until it changes. Two hooks that see the same turn cannot both send: the crossing and the cooldown are each claimed with one conditional database update, and a send that fails releases the claim so the next turn retries.
+
+The message is text. A button tap is not delivered to the agent, so the list is the control. `1`, `2`, `3`, and `4` are the choice even when more words follow (`1 compact and new`). Anything else is a normal reply, not a gauge choice. The agent calls `gauge_action` and does not ask again. `gauge_action` records that reply (`compact`, `new`, `compact+new`, or `dismiss`) and asks Hermes to run `/compact` and `/new`. The plugin never compacts or starts a session itself.
 
 With the default route the message is posted with `PluginContext.post_message` on the session the hook just updated (the channel Hermes uses for a user-visible notice; the local surface publishes `notification.show`). No live session means the crossing is recorded and not retried until the status changes.
 

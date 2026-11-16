@@ -95,6 +95,14 @@ def memory_db():
     tools._STATE_DB = NO_STATE_DB
     tools._HERMES_HOME = None
     tools._HERMES_COMMAND = None
+    tools._CRON_RUNNER = None
+    tools._NOTICE_WAIT_S = 0
+    with tools._NOTICE_LOCK:
+        for slot in tools._NOTICE_PENDING.values():
+            timer = slot.get("timer")
+            if timer is not None:
+                timer.cancel()
+        tools._NOTICE_PENDING.clear()
     yield conn
     conn.close()
     _CONN["conn"] = None
@@ -107,6 +115,14 @@ def memory_db():
     tools._STATE_DB = None
     tools._HERMES_HOME = None
     tools._HERMES_COMMAND = None
+    tools._CRON_RUNNER = None
+    tools._NOTICE_WAIT_S = 0
+    with tools._NOTICE_LOCK:
+        for slot in tools._NOTICE_PENDING.values():
+            timer = slot.get("timer")
+            if timer is not None:
+                timer.cancel()
+        tools._NOTICE_PENDING.clear()
 
 
 def test_tools_use_the_replaced_plugin_db_import():
@@ -997,6 +1013,10 @@ def _route_config(tmp_path, monkeypatch, route):
     return target
 
 
+def _with_menu(message, lang="en"):
+    return message + "\n\n" + tools._alert_copy(lang)["menu"]
+
+
 def test_default_route_keeps_the_alert_payload_exactly_as_before(tmp_path, monkeypatch):
     _config_file(tmp_path, monkeypatch)
     sent = _capture_alerts(monkeypatch)
@@ -1004,7 +1024,7 @@ def test_default_route_keeps_the_alert_payload_exactly_as_before(tmp_path, monke
     tools.gauge_check(session_id="sess")
     assert sent == [
         {
-            "message": (
+            "message": _with_menu(
                 _watch_text("sess")
                 + "\n\nHermes Gauge — session sess: 70% effective, dull threshold 70%: "
                 "recommended = compact, then new session."
@@ -1032,9 +1052,11 @@ def test_custom_route_goes_through_hermes_send_not_the_session(tmp_path, monkeyp
     assert sends == [
         (
             "telegram:-1001234567890",
-            _full_text("sess")
-            + "\n\nHermes Gauge — session sess: 85% effective, dull threshold 70%: "
-            "recommended = compact, then new session.",
+            _with_menu(
+                _full_text("sess")
+                + "\n\nHermes Gauge — session sess: 85% effective, dull threshold 70%: "
+                "recommended = compact, then new session."
+            ),
         ),
     ]
     assert posts == []
@@ -1823,6 +1845,46 @@ def test_a_turn_that_crosses_watch_and_the_dull_line_sends_one_bubble(monkeypatc
     assert message.count("Hermes Gauge") == 2
 
 
+def test_a_burst_sends_the_latest_notice_once(monkeypatch):
+    sent = _capture_alerts(monkeypatch)
+    monkeypatch.setattr(tools, "_NOTICE_WAIT_S", 30)
+    monkeypatch.setattr(tools, "_arm_notice", lambda session_id, gen: None)
+    tools.record_llm_call("sess", 280_000, model="opus")
+    tools.gauge_check(session_id="sess")
+    assert sent == []
+    first = tools._NOTICE_PENDING["sess"]["message"]
+    assert "70% full" in first
+    tools.record_llm_call("sess", 340_000, model="opus", replace=True)
+    tools.gauge_check(session_id="sess")
+    assert sent == []
+    latest = tools._NOTICE_PENDING["sess"]["message"]
+    assert "85% full" in latest
+    tools._flush_notice("sess", tools._NOTICE_PENDING["sess"]["gen"])
+    assert [item["message"] for item in sent] == [latest]
+
+
+def test_the_same_warning_stays_quiet_for_a_minute_and_full_still_speaks(monkeypatch):
+    sent = _capture_alerts(monkeypatch)
+    clock = {"t": 10_000.0}
+    monkeypatch.setattr(tools.time, "time", lambda: clock["t"])
+    tools.record_llm_call("sess", 280_000, model="opus")
+    tools.gauge_check(session_id="sess")
+    assert len(sent) == 1
+    conn = tools._db()
+    conn.execute(
+        "UPDATE usage SET watch_alerted_at = NULL, dull_latched = 0, "
+        "dull_alerted_at = NULL, notified_status = NULL WHERE session_id = 'sess'"
+    )
+    conn.commit()
+    clock["t"] += 30
+    tools.gauge_check(session_id="sess")
+    assert len(sent) == 1
+    tools.record_llm_call("sess", 340_000, model="opus", replace=True)
+    tools.gauge_check(session_id="sess")
+    assert len(sent) == 2
+    assert "85% full" in sent[-1]["message"]
+
+
 def test_a_failed_send_releases_the_claim_so_the_next_turn_retries(monkeypatch):
     attempts = []
 
@@ -1913,6 +1975,12 @@ def test_gauge_action_hands_commands_to_hermes_and_does_not_compact():
     parsed = json.loads(raw)
     assert parsed["action"] == "compact_new"
     assert parsed["commands"] == ["/compact", "/new"]
+    # Words after the digit are still the menu choice, not a new question.
+    spoken = tools._gauge_action("1 compact and new", "release-review")
+    assert spoken["action"] == "compact_new"
+    assert tools._gauge_action("4", "release-review")["action"] == "dismiss"
+    assert tools._gauge_action("stop boring me", "release-review")["action"] == "dismiss"
+    assert tools._gauge_action("10", "release-review")["ok"] is False
 
 
 def test_dismiss_quiets_the_status_until_it_changes(monkeypatch):
@@ -1939,6 +2007,16 @@ def test_dismiss_quiets_the_status_until_it_changes(monkeypatch):
     tools.gauge_check(session_id="release-review")
     assert len(_status_pushes(sent)) == 2
     assert "85% full" in _status_pushes(sent)[-1]["message"]
+
+
+def test_the_reply_list_stays_english_when_the_notice_is_french(monkeypatch):
+    sent = _capture_alerts(monkeypatch)
+    monkeypatch.setattr(tools, "load_config", lambda: _config(language="fr"))
+    tools.record_llm_call("sess", 280_000, model="opus")
+    tools.gauge_check(session_id="sess")
+    message = sent[0]["message"]
+    assert message.endswith(tools._alert_copy("en")["menu"])
+    assert message.count("Reply with a number") == 1
 
 
 def test_gauge_action_rejects_unknown_input_and_skips_handoff_without_hermes():
@@ -2332,7 +2410,9 @@ def test_policy_verdict_names_the_model_tier_and_audit_never_acts(monkeypatch):
     pushes = _policy_pushes(sent)
     assert len(pushes) == 1
     assert "recommended action" not in pushes[0]["message"]
-    assert pushes[0]["message"].endswith(verdict["recommendation"])
+    assert verdict["recommendation"] in pushes[0]["message"]
+    assert pushes[0]["message"].endswith(tools._alert_copy("en")["menu"])
+    assert pushes[0]["message"].count("Reply with a number") == 1
     reasons = [event["reason"] for event in tools.compaction_events("flash")]
     assert "compact" not in reasons
     assert "new_session" not in reasons
