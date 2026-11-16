@@ -282,6 +282,18 @@ def _api_audit(limit: int = 10, lang: str = "en", session_id: str = "") -> dict:
     ))
 
 
+@router.get("/setup")
+def _api_setup(lang: str = "", project: str = "") -> dict:
+    """The memory and skills checklist, at the limits the preferences set. Reads only."""
+    def build():
+        data = _tools().gauge_setup(action="scan", lang=lang or None, project=project or None)
+        data.pop("html", None)
+        data["ok"] = True
+        return data
+
+    return _safe(build)
+
+
 @router.get("/report/incidents")
 def _api_incidents(lang: str = "", days: str = "", format: str = "json") -> dict:
     """The incident report as data. ``format=html`` adds the page as ``html``.

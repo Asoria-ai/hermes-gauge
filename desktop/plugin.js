@@ -500,7 +500,7 @@ const SOFT = 'var(--ui-text-secondary, var(--ui-text-quaternary))'
 const RULE = '1px solid var(--ui-stroke-secondary, rgba(255,255,255,0.08))'
 const NARROW = 268
 const WIDE = 340
-const VIEWS = [['gauge', 'Now'], ['audit', 'History'], ['settings', 'Settings']]
+const VIEWS = [['gauge', 'Now'], ['memory', 'Memory'], ['audit', 'History'], ['settings', 'Settings']]
 const PART_ORDER = ['conversation', 'tools', 'system_prompt', 'skills']
 const PART_NAMES = { conversation: 'conversation', tools: 'tools', system_prompt: 'system', skills: 'skills' }
 const PART_COLORS = { conversation: '#6ea8fe', tools: '#c9a0ff', system_prompt: '#ffb74d', skills: '#00e676' }
@@ -716,6 +716,145 @@ function AuditView({ ctx, open }) {
   })
 }
 
+// --- Memory -----------------------------------------------------------------------
+// What Hermes pastes before every message, at the limits of the chosen memory level.
+// The view reads `/setup`; nothing here edits a file.
+
+const SEVERITY_COLORS = { OK: '#00e676', WARN: '#ffb74d', ALERT: '#ff8a80', warn: '#ffb74d', alert: '#ff8a80' }
+const SOURCE_NAMES = { own: 'yours', project: 'project', published: 'published', external: 'external' }
+const POLICY_NAMES = { split: 'may split', skip: 'skipped', report: 'report only', leave: 'leave as is' }
+
+function MemoryRow({ left, right, sub, color }) {
+  return jsx('div', {
+    style: { padding: '5px 0', borderTop: RULE },
+    children: [
+      jsx('div', {
+        key: 'line',
+        style: { display: 'flex', justifyContent: 'space-between', gap: 8, font: '600 12px/1.3 ' + SANS },
+        children: [
+          jsx('span', { key: 'l', title: left, style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, children: left }),
+          jsx('span', { key: 'r', style: { color: color || SOFT, font: '11px/1.3 ' + MONO, flexShrink: 0 }, children: right })
+        ]
+      }),
+      sub ? jsx('div', { key: 'sub', style: { marginTop: 2, color: MUTED, font: '11px/1.4 ' + SANS }, children: sub }) : null
+    ]
+  })
+}
+
+function Section({ title }) {
+  return jsx('p', { style: { margin: '10px 0 2px', font: '700 11px/1.3 ' + SANS, letterSpacing: '0.04em', color: MUTED }, children: title })
+}
+
+async function copySetup(ctx, data, say) {
+  const os = ctx.os || {}
+  const copied = os.writeClipboard && data && data.markdown ? await os.writeClipboard(data.markdown) : false
+  say(copied ? 'Copied as markdown.' : 'The clipboard is not available here.', !copied)
+}
+
+function MemoryView({ ctx, open }) {
+  const [data, setData] = useState(null)
+  const [error, setError] = useState('')
+  const [note, setNote] = useState({ text: '', bad: false })
+  const say = (text, bad) => setNote({ text: text, bad: !!bad })
+
+  useEffect(() => {
+    if (!open) return undefined
+    let live = true
+    ctx.rest('/setup?lang=' + reportLang(), { method: 'GET' }).then(out => {
+      if (!live) return
+      if (!out || out.ok === false) { setError((out && out.error) || 'The memory check failed.'); return }
+      setError('')
+      setData(out)
+    }).catch(e => { if (live) setError(failure(e)) })
+    return () => { live = false }
+  }, [open])
+
+  const quiet = { margin: 0, color: SOFT, font: '12px/1.45 ' + SANS }
+  const body = []
+  if (error) body.push(jsx('p', { key: 'err', style: { ...quiet, color: '#ff8a80' }, children: error }))
+  else if (!data) body.push(jsx('p', { key: 'wait', style: quiet, children: 'Measuring memory and skills…' }))
+  else {
+    const lim = data.limits || {}
+    const status = data.status || 'OK'
+    body.push(jsx('div', {
+      key: 'head',
+      style: { display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 },
+      children: [
+        jsx('span', { key: 't', style: { font: '700 20px/1.1 ' + SANS }, children: '≈' + formatCompact(data.always_on_tokens || 0) + ' tok' }),
+        jsx('span', { key: 's', style: { color: SEVERITY_COLORS[status] || SOFT, font: '700 11px/1.2 ' + MONO }, children: status })
+      ]
+    }))
+    body.push(jsx('p', {
+      key: 'sub',
+      style: { margin: '2px 0 0', color: MUTED, font: '11px/1.4 ' + SANS },
+      children: 'pasted before every message · level ' + (lim.level || 'standard') + ' · ' + formatCompact(lim.turn_tokens || 2000) + ' per block'
+    }))
+
+    const stores = (data.memory && data.memory.stores) || []
+    if (stores.length || (data.skills && data.skills.count)) body.push(jsx(Section, { key: 's-every', title: 'EVERY TURN' }))
+    stores.forEach(row => {
+      const fill = typeof row.fill === 'number' ? ' · ' + Math.round(row.fill * 100) + '% of cap' : ''
+      const hot = row.tokens > (lim.turn_tokens || 2000) || (typeof row.fill === 'number' && row.fill > (lim.fill_alert || 0.9))
+      body.push(jsx(MemoryRow, { key: 'm-' + row.label, left: row.label, right: formatCompact(row.tokens) + ' tok' + fill, color: hot ? '#ff8a80' : SOFT }))
+    })
+    if (data.skills && data.skills.count) {
+      const idx = data.skills.index_tokens || 0
+      body.push(jsx(MemoryRow, { key: 'm-index', left: 'skill index (' + data.skills.count + ' skills)', right: formatCompact(idx) + ' tok', color: idx > (lim.turn_tokens || 2000) ? '#ff8a80' : SOFT }))
+    }
+
+    const cuts = data.priorities || []
+    if (cuts.length) {
+      body.push(jsx(Section, { key: 's-cuts', title: 'BEST CUTS' }))
+      cuts.forEach(item => body.push(jsx(MemoryRow, {
+        key: 'c-' + item.rank,
+        left: item.rank + '. ' + item.title,
+        right: '−' + formatCompact(item.save_tokens || 0) + (item.save_scope === 'every_turn' ? '/turn' : ' when opened'),
+        color: '#00e676',
+        sub: item.reco
+      })))
+    }
+
+    const groups = (data.skills && data.skills.groups) || []
+    if (groups.length) {
+      body.push(jsx(Section, { key: 's-groups', title: 'SKILLS BY SOURCE' }))
+      groups.forEach(row => body.push(jsx(MemoryRow, {
+        key: 'g-' + row.source + '-' + row.category,
+        left: (SOURCE_NAMES[row.source] || row.source) + ' / ' + row.category,
+        right: row.count + ' · ' + formatCompact(row.index_tokens) + ' tok',
+        color: row.to_split ? '#ffb74d' : SOFT,
+        sub: (POLICY_NAMES[row.policy] || row.policy) + (row.long ? ' · ' + row.long + ' long' : '') + (row.to_split ? ' · ' + row.to_split + ' to split' : '')
+      })))
+      const plan = (data.skills && data.skills.split_plan) || []
+      const mode = lim.review_mode === 'split' ? 'the scheduled review splits them' : 'report only — set Scheduled review to split'
+      body.push(jsx('p', { key: 'mode', style: { margin: '6px 0 0', color: MUTED, font: '11px/1.4 ' + SANS }, children: 'Split plan: ' + plan.length + (plan.length ? ' · ' + mode : '') }))
+    }
+
+    const failed = (data.checks || []).filter(item => !item.ok)
+    if (failed.length) {
+      body.push(jsx(Section, { key: 's-checks', title: 'FINDINGS' }))
+      failed.forEach((item, i) => body.push(jsx('p', {
+        key: 'f-' + i,
+        style: { margin: '3px 0 0', color: SEVERITY_COLORS[item.severity] || SOFT, font: '11px/1.4 ' + SANS },
+        children: item.detail
+      })))
+    }
+  }
+  return jsx('div', {
+    children: body.concat([
+      jsx('div', {
+        key: 'actions',
+        style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 10 },
+        children: [
+          jsx(ActionButton, { key: 'levels', label: 'Adjust levels', primary: true, onClick: () => viewAtom.set('settings') }),
+          jsx(ActionButton, { key: 'copy', label: 'Copy report', disabled: !data, onClick: () => copySetup(ctx, data, say) })
+        ]
+      }),
+      jsx(Note, { key: 'note', text: note.text, bad: note.bad }),
+      jsx('p', { key: 'foot', style: { margin: '8px 0 0', color: MUTED, font: '10px/1.4 ' + SANS }, children: 'Measured from files, no model call. Published and external skills are never edited. /gauge review on Telegram writes the full brief.' })
+    ])
+  })
+}
+
 // --- Settings ---------------------------------------------------------------------
 // Form values live as strings or booleans while the user types. Only what changed
 // is sent, and the server's answer is the truth: the form reloads from it.
@@ -724,15 +863,17 @@ function toDraft(field) {
   const v = field.value
   if (field.type === 'ratio') return String(Math.round(Number(v) * 1000) / 10)
   if (field.type === 'bool') return !!v
-  if (field.type === 'statuses') return Array.isArray(v) ? v.slice() : []
+  if (field.type === 'statuses' || field.type === 'multi') return Array.isArray(v) ? v.slice() : []
+  if (field.type === 'words') return Array.isArray(v) ? v.join(', ') : ''
   return v == null ? '' : String(v)
 }
 
 function toPayload(field, draft) {
   if (field.type === 'bool') return !!draft
-  if (field.type === 'statuses') return Array.isArray(draft) ? draft.slice() : []
+  if (field.type === 'statuses' || field.type === 'multi') return Array.isArray(draft) ? draft.slice() : []
   const text = String(draft == null ? '' : draft).trim()
-  if (field.type === 'route') return text
+  if (field.type === 'words') return text.split(/[,\s]+/).filter(Boolean).map(w => w.toLowerCase())
+  if (field.type === 'route' || field.type === 'choice') return text
   const n = Number(text)
   if (text === '' || !Number.isFinite(n)) return text
   return field.type === 'ratio' ? Math.round(n * 10) / 1000 : n
@@ -771,7 +912,21 @@ function FieldControl({ field, value, onChange }) {
   if (field.type === 'bool') {
     return jsx('input', { id: id, type: 'checkbox', checked: !!value, onChange: e => onChange(e.target.checked) })
   }
-  if (field.type === 'statuses') {
+  if (field.type === 'choice') {
+    return jsx('select', {
+      id: id, value: String(value), style: inputStyle,
+      onChange: e => onChange(e.target.value),
+      children: (field.choices || []).map(choice => jsx('option', { key: choice, value: choice, children: choice }))
+    })
+  }
+  if (field.type === 'words') {
+    return jsx('input', {
+      id: id, type: 'text', value: String(value), style: inputStyle,
+      placeholder: 'devops, research', spellCheck: false, autoCapitalize: 'off',
+      onChange: e => onChange(e.target.value)
+    })
+  }
+  if (field.type === 'statuses' || field.type === 'multi') {
     return jsx('span', {
       style: { display: 'inline-flex', gap: 10 },
       children: (field.choices || ['WATCH', 'FULL']).map(choice => jsx('label', {
@@ -907,7 +1062,7 @@ function SettingsView({ ctx, open }) {
           style: { display: 'flex', justifyContent: 'space-between', gap: 8, marginBottom: 4, font: '600 12px/1.3 ' + SANS },
           children: [
             jsx('span', { key: 'l', children: field.label }),
-            jsx('span', { key: 's', style: { color: MUTED, font: '10px/1.3 ' + MONO }, children: field.source === 'file' ? '' : 'default' })
+            jsx('span', { key: 's', style: { color: MUTED, font: '10px/1.3 ' + MONO }, children: field.source === 'file' ? '' : field.from_level ? 'level ' + field.from_level : 'default' })
           ]
         }),
         jsx(FieldControl, {
@@ -919,7 +1074,7 @@ function SettingsView({ ctx, open }) {
       ]
     })
   }
-  const rows = groupRows('Basic', 'basic').concat(groupRows('Advanced', 'advanced'))
+  const rows = groupRows('Basic', 'basic').concat(groupRows('Memory & skills', 'memory'), groupRows('Advanced', 'advanced'))
   return jsx('div', {
     children: rows.concat([
       jsx('div', {
@@ -1079,8 +1234,9 @@ function Chip({ ctx }) {
       }),
       jsx(Tabs, { key: 'tabs', view }),
       view === 'audit' ? jsx(AuditView, { key: 'audit', ctx, open })
-        : view === 'settings' ? jsx(SettingsView, { key: 'settings', ctx, open })
-          : jsx(PanelBody, { key: 'body', d, history })
+        : view === 'memory' ? jsx(MemoryView, { key: 'memory', ctx, open })
+          : view === 'settings' ? jsx(SettingsView, { key: 'settings', ctx, open })
+            : jsx(PanelBody, { key: 'body', d, history })
     ]
   }
   if (POPOVER_OK) panelProps.popover = 'auto'
