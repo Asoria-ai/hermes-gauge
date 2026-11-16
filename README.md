@@ -14,6 +14,26 @@ This plugin is the [Hermes Gauge context window gauge](http://hermes-gauge.asori
 
 The demo dashboard (`make demo`) with its six fictional sessions. The plugin reads the same numbers from your own sessions.
 
+## Three jobs
+
+| | What you get | Where |
+| --- | --- | --- |
+| **Gauge** | How full the conversation is, against the window the model can really use. OK, WATCH at 60%, FULL at 85%. | Desktop chip, `/gauge`, `gauge_check` |
+| **Alerts** | One notice when a session crosses WATCH or FULL, with numbered replies: compact, new, or both. | the chat, or your Telegram home |
+| **Memory optimizer** | What Hermes pastes before every message (memory files, skill index, recall), the cuts ranked by tokens saved, and an optional nightly job that splits your own long skills. | Desktop **Memory** tab, `/gauge memory`, `gauge_setup` |
+
+Every limit has a default. Pick a level (`lean`, `standard`, `roomy`) or set each value yourself. See [Memory optimizer](#memory-optimizer).
+
+## What's new in 0.7.0
+
+- **Memory optimizer.** `/gauge memory` (same as `/gauge setup`) and the Desktop **Memory** tab show what is pasted on every turn, the best cuts, and your skills grouped by source and category.
+- **Memory levels.** `memory.level` sets every limit at once: `lean`, `standard` (default), or `roomy`. Any single `memory.*` key you write wins over the level.
+- **Split by source and category.** Your own skills can be split; published and external ones are only named. `memory.split_sources` and `memory.skip_categories` choose which.
+- **Nightly review.** `/gauge review schedule 24h 03:00 Europe/Paris` creates a Hermes cron job. It reports by default. With `memory.review_mode: split`, it may split the skills on the split plan, and nothing else.
+- **Numbered replies.** A WATCH or FULL notice ends with a list: 1 compact then new, 2 compact, 3 new, 4 stop. A leading digit is the answer even when words follow.
+- **One notice per burst.** Checks a few seconds apart are held and sent once, then that level stays quiet for a minute. A worse crossing still goes out.
+- **New tool `gauge_setup`.** The same checklist for an agent to call. No existing tool was renamed.
+
 ## Install
 
 Hermes has to be installed already.
@@ -28,7 +48,7 @@ In Hermes Desktop: Capabilities → Plugins → Install from Git, with `Asoria-a
 
 1. Send a message. The Desktop chip names the conversation and a percentage of the window the model can actually use.
 2. At 60% it says WATCH. At 85% it says FULL, and a short notice asks for a summary, then `/new`. Hermes Gauge only watches; it never changes the chat.
-3. `/gauge` is one line for this conversation. `/gauge audit` is the peaks. `/gauge setup` is what gets pasted on every turn. `/gauge incidents` is the page that still shows what happened after a summary reset the counter. `/gauge window 200000` records the window when the gauge shows an em dash.
+3. `/gauge` is one line for this conversation. `/gauge audit` is the peaks. `/gauge memory` is what gets pasted on every turn, and what to cut. `/gauge incidents` is the page that still shows what happened after a summary reset the counter. `/gauge window 200000` records the window when the gauge shows an em dash.
 
 ## Glossary
 
@@ -213,10 +233,10 @@ The `gauge-viewer` skill answers in the user's language:
 | `/gauge report`, `/gauge md`, `/gauge json` | `gauge_report` | text, markdown, or JSON |
 | `/gauge report write` (or `md write`) | `gauge_report` with `write` | the report as a `.md` file, attached |
 | `/gauge audit` | audit | peaks, compactions, what the context is made of |
-| `/gauge setup` | `gauge_setup` | what is pasted every turn: memory, skill index, recall |
+| `/gauge memory` (or `/gauge setup`) | `gauge_setup` | what is pasted every turn, the cuts, skills by source and category |
 | `/gauge review` | `gauge_setup` action `review` | the same checklist, plus a report-only brief |
-| `/gauge review apply` | `gauge_setup` | the brief may edit your own skills, and no published one |
-| `/gauge review schedule 24h 03:00 Europe/Paris` | cron | nightly review, as a file, on the model you pinned |
+| `/gauge review apply` | `gauge_setup` | the brief may split the skills on the split plan, and nothing else |
+| `/gauge review schedule 24h 03:00 Europe/Paris` | cron | nightly review, as a file; splits only when `memory.review_mode` is `split` |
 | `/gauge incidents` | incident report | a verdict line and the report page, attached |
 | `/gauge config` | preferences | every setting and where its value comes from |
 | `/gauge config set key=value` | preferences | saves one or more settings to `config.yaml` |
@@ -328,29 +348,79 @@ chars_per_token          4  (default)
 | `alerts.route` | `session` | `session`, `home`, `home:<platform>`, `custom:<platform>:<chat_id>` |
 | `output_reserve` | `0` | whole tokens, 0 to 10,000,000 |
 | `chars_per_token` | `4` | whole number, 1 to 8 |
+| `memory.level` | `standard` | `lean`, `standard`, `roomy`; the other `memory.*` keys are in [Memory optimizer](#memory-optimizer) |
 
 `/gauge config set thresholds.watch=55 alerts.route=home` changes both or neither: a refused value comes back with the reason and nothing is written. `thresholds.watch=0.55` and `55` mean the same thing. Edits are made in place, so comments and the other keys stay as they were. The thresholds and `chars_per_token` set the chip, the tools, and the alerts alike; the chip falls back to the v0.4 numbers when the file cannot be read.
 
 Settings you save are written to `~/.hermes/plugin-data/hermes-gauge/config.yaml`. The file inside the plugin folder is only the defaults, so an update does not put your thresholds back.
 
-## Context setup
+## Memory optimizer
 
-`/gauge setup` answers a different question from `/gauge audit`. The audit is what one session went through. The setup is what Hermes pastes in before you type, on every turn: `MEMORY.md`, `USER.md`, `SOUL.md`, the skill-index descriptions, an external recall cap, and, when you pass a directory, that project's `AGENTS.md`.
+`/gauge memory` answers a different question from `/gauge audit`. The audit is what one session went through. The memory optimizer is what Hermes pastes in before you type, on every turn: `MEMORY.md`, `USER.md`, `SOUL.md`, the skill-index descriptions, an external recall cap, and, when you pass a directory, that project's `AGENTS.md`. Then it tells you what to cut.
 
 ```text
-/gauge setup
-/gauge setup /path/to/client
-/gauge setup txt
-/gauge setup html
+/gauge memory
+/gauge memory /path/to/client
+/gauge memory txt
+/gauge memory html
 ```
 
-`/gauge setup` is markdown. `txt` is the same report as plain text. `html` is one self-contained page. `json` is the object, for a tool call.
+`/gauge setup` is the same command. The default is markdown. `txt` is plain text. `html` is one self-contained page. `json` is the object, for a tool call. In Hermes Desktop it is the **Memory** tab of the gauge popover, with the same four sections:
 
-The first section is the ranked cuts. Each one has four lines: what it is, the recommendation, how many tokens it gives back, and a confidence that the cut does not change how the agent works. An unused skill is counted from `skills/.usage.json` when that file exists: not opened in the last 7 days. Taking its description out of the index saves that many tokens on every turn, as a share of what is pasted before the message. Splitting a long skill of yours saves tokens on the turns that open it, not on every message. The steps move to `references/` and still load on demand.
+1. **Pasted every turn.** Each block with its tokens, flagged when it is over the per-block budget. A memory file near its character cap is flagged too, because the next write fails.
+2. **Best cuts.** Ranked by tokens given back. Each one says what it is, what to do, what it saves, and how sure the cut is not to change how the agent works. An unused skill is counted from `skills/.usage.json`: not opened within `memory.unused_days`. Taking its description out of the index saves those tokens on every turn. Splitting a long skill saves tokens on the turns that open it; the steps move to `references/` and still load on demand.
+3. **Skills by source and category.** One row per source and category, with the index cost, the long skills, the ones to split, and the policy that applies.
+4. **Findings.** Everything else worth knowing, such as a live `telegram:` block.
 
-Each of those blocks is estimated at 4 characters per token and flagged above 2,000 tokens. A memory file above 90% of its character cap is flagged too, because the next write fails. Skills are classed as yours, published (Hermes, Nous, or a GitHub source), or external. An own skill over 15,000 tokens is a warning. Over 20,000, the report says to split it into a short `SKILL.md` plus `references/`. Published and external skills are named and left as they are.
+### Levels
 
-`/gauge review` adds a brief for a model. It does not edit files. `/gauge review apply` is the only form that allows edits, and only of your own skills. The model is the profile default until you pin one:
+You do not have to tune anything. The default level is `standard`. Change it in one line:
+
+```text
+/gauge config set memory.level=lean
+```
+
+| Key | `lean` | `standard` | `roomy` | Means |
+| --- | --- | --- | --- | --- |
+| `memory.turn_tokens` | 1,500 | 2,000 | 3,000 | budget for one block pasted every turn |
+| `memory.fill_alert` | 80% | 90% | 95% | memory file share of its character cap that gets flagged |
+| `memory.skill_warn_tokens` | 8,000 | 15,000 | 25,000 | a skill this long is reported as long |
+| `memory.skill_split_tokens` | 12,000 | 20,000 | 35,000 | a skill this long goes on the split plan |
+| `memory.unused_days` | 5 | 7 | 14 | days without use before a skill counts as unused |
+
+`lean` suits small or local models, where every token on every turn costs. `roomy` suits a large window and long, deliberate skills. A key you write yourself wins over the level, and `/gauge config` shows where each value comes from:
+
+```text
+memory.level               lean  (file)
+memory.turn_tokens         1,500 tokens  (level lean)
+memory.skill_split_tokens  18,000 tokens  (file)
+memory.review_mode         report  (default)
+```
+
+The split line cannot be set below the warn line; that change is refused and nothing is written.
+
+### Sources and categories
+
+Each skill has a source and a category. The category is the folder above the skill folder: `devops` in `skills/devops/deploy/SKILL.md`.
+
+| Source | Which skills | Default policy |
+| --- | --- | --- |
+| `own` | your skills under `~/.hermes/skills/` | **split** when over the split line |
+| `project` | skills in the project directory you named | **report** (add `project` to `memory.split_sources` to split them) |
+| `published` | a skill whose frontmatter author is Hermes or Nous, or that has a `source`, `homepage` or `repository` URL | **leave**, never edited |
+| `external` | a folder listed in `skills.external_dirs` | **leave**, never edited |
+
+| Key | Default | Allowed |
+| --- | --- | --- |
+| `memory.split_sources` | `[own]` | `own`, `project`, or both |
+| `memory.skip_categories` | `[]` | category names never touched, for example `[legal, clients]` |
+| `memory.review_mode` | `report` | `report` or `split`, for the scheduled review |
+
+The **split plan** is the list of skills whose policy is split and whose size is at or over `memory.skill_split_tokens`. It is the only list of files any review may change. Splitting keeps the frontmatter `name` and `description`, keeps `SKILL.md` under the per-block budget (when to use it, and a map of the steps), and moves the procedure, examples and tables to `references/<topic>.md`.
+
+### Review and nightly job
+
+`/gauge review` adds a brief for a model. It does not edit files. `/gauge review apply` lets that model split the skills on the split plan, and nothing else. The model is the profile default until you pin one:
 
 ```text
 /gauge review model z-ai/glm-5.3-flash provider openrouter
@@ -370,6 +440,12 @@ An empty model means the profile default. A nightly pass suits `z-ai/glm-5.3-fla
 ```
 
 The hour-step has to divide 24. The job is a normal Hermes cron entry, skill `gauge-context-review`, delivery `local`, so the report is a file and not a Telegram message. `/gauge review project /path/to/client` saves the directory the job runs from.
+
+Each night the job asks the plugin for a fresh brief, so it always follows your current preferences. With `memory.review_mode: report` (the default) it writes the report and edits nothing. With `split` it splits the skills on the split plan and lists each one, tokens before and after:
+
+```text
+/gauge config set memory.review_mode=split memory.skip_categories=legal,clients
+```
 
 A live `telegram:` block is reported as a warning. A short message still starts a turn in 0.18s, photos and PDFs are a separate queue, and the adapter reads `HERMES_TELEGRAM_TEXT_BATCH_DELAY_SECONDS` rather than that YAML key. Holding a multi-message brief belongs in the Hermes Telegram adapter. This plugin only names the finding.
 
@@ -430,8 +506,8 @@ Requires Hermes 0.22.3 or later, the first release with the `post_compaction` ho
 - **Writes**: only under `plugin-data/hermes-gauge/` in the Hermes home of the active profile (`~/.hermes` for the default profile): the readings database, your saved preferences, written reports. Reads follow the same profile.
 - **Reads outside its own data**: Hermes' `state.db`, read-only, for session titles and last activity.
 - **Shell commands**: `hermes send --quiet --to <target>`, only when `alerts.route` is `home` or `custom:`. It runs in a short background thread with a 45-second timeout.
-- **Context setup**: `/gauge setup` and `gauge_setup` read `config.yaml`, `SOUL.md`, `memories/`, `profiles/*/memories/`, `skills/`, `hindsight/config.json` when it is there, and an optional project directory you name. They report. They do not edit those files.
-- **Review schedule**: `/gauge review schedule` runs `hermes cron` and writes `plugin-data/hermes-gauge/review.json` (the model pin, the project path, the job id). `/gauge review apply` returns instructions. The plugin still does not rewrite a skill itself.
+- **Memory optimizer**: `/gauge memory` and `gauge_setup` read `config.yaml`, `SOUL.md`, `memories/`, `profiles/*/memories/`, `skills/`, `hindsight/config.json` when it is there, and an optional project directory you name. They report. They do not edit those files.
+- **Review schedule**: `/gauge review schedule` runs `hermes cron` and writes `plugin-data/hermes-gauge/review.json` (the model pin, the project path, the job id). The plugin never rewrites a skill itself. The agent may, in two cases you choose: `/gauge review apply`, or the scheduled job with `memory.review_mode: split`. Either way it may only split the skills on the split plan: your own skills (and project skills if you add `project` to `memory.split_sources`), never published or external ones, never a category in `memory.skip_categories`.
 - **Not a command of its own**: `tools.gauge_audit()` called from Python with no `format` still runs the older setup audit. It runs `hermes doctor` (120-second timeout) and reads sizes. `/gauge setup` does not call `hermes doctor`.
 - **Credentials**: none read, none stored.
 
@@ -533,14 +609,6 @@ The fill is an estimate unless the provider already counted tokens.
 - `fallback` is that 200,000 default. It is not a discovered context length. An alias or a preset name is never treated as a window.
 - If detection fails, or compaction invalidated the anchor and no new measurement has arrived, the gauge shows **—** instead of guessing. A provider token count or a full transcript is a measurement; a reply, or half a reply from a broken stream, is not. The window that was already detected stays known across a summary. The fill never goes above 100% or below 0%.
 - The bar can still be wrong: this is not the model's tokenizer, a stream only counts what the hooks delivered, and a multi-agent subject is only as wide as its smallest window.
-
-## What's new in 0.7.0
-
-- **Numbered replies.** A WATCH or FULL notice ends with a list: 1 compact then new, 2 compact, 3 new, 4 stop. A leading digit is the answer even when words follow.
-- **One notice per burst.** Checks a few seconds apart are held and sent once, then that level stays quiet for a minute. A worse crossing still goes out.
-- **`/gauge setup`.** What Hermes pastes into context on every turn, with the cuts ranked by tokens saved.
-- **`/gauge review`.** A report-only brief, and `review schedule` for a nightly run. Only `review apply` may edit, and only your own skills.
-- **New tool `gauge_setup`.** The same checklist for an agent to call. No existing tool was renamed.
 
 ## Built for the Nous Research hackathon
 
