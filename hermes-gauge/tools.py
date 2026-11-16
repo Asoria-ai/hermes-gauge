@@ -2428,12 +2428,23 @@ def _emit_setup(result, kind):
     return result.get("markdown") or result.get("text") or ""
 
 
+def _setup_limits():
+    """The ``memory.*`` preferences in force. Defaults when the file cannot be read."""
+    prefs = _sibling("prefs")
+    try:
+        return prefs.memory_limits(prefs.view(config_path()))
+    except Exception:
+        return None
+
+
 def gauge_setup(*args, action="scan", project=None, format=None, lang=None,
-                schedule=None, model=None, provider=None, apply=False, **kwargs):
+                schedule=None, model=None, provider=None, apply=False,
+                scheduled=False, **kwargs):
     """Checklist of what is pasted every turn, or the review schedule around it.
 
     ``scan`` measures and writes nothing. ``review`` adds instructions for a
-    model; ``apply`` only widens those instructions to the user's own skills.
+    model; ``apply`` widens them to the skills on the split plan. A
+    ``scheduled`` review may edit only when ``memory.review_mode`` is ``split``.
     ``schedule`` creates a Hermes cron job. This function never calls a model
     and never edits a skill.
     """
@@ -2455,6 +2466,8 @@ def gauge_setup(*args, action="scan", project=None, format=None, lang=None,
                 provider = value.get("provider")
             if "apply" in value:
                 apply = value.get("apply")
+            if "scheduled" in value:
+                scheduled = value.get("scheduled")
     action = str(action or "scan").strip().lower()
     mod = _sibling("setup_audit")
     language = _active_language(lang)
@@ -2485,14 +2498,15 @@ def gauge_setup(*args, action="scan", project=None, format=None, lang=None,
     saved = mod.load_state(path)
     if not project and saved.get("project"):
         project = saved["project"]
-    data = mod.scan(hermes_home(), project=project or None, lang=language)
+    data = mod.scan(hermes_home(), project=project or None, lang=language, limits=_setup_limits())
     data["review"] = saved
     data["text"] = mod.render_text(data)
     data["markdown"] = mod.render_markdown(data)
     extra = ""
     if action == "review":
         data["apply"] = bool(apply)
-        extra = mod.brief(data, apply=bool(apply))
+        data["scheduled"] = bool(scheduled)
+        extra = mod.brief(data, apply=bool(apply), scheduled=bool(scheduled))
         data["brief"] = extra
         data["text"] = data["text"] + "\n\n" + extra
         data["markdown"] = data["markdown"] + "\n\n" + extra
@@ -2557,7 +2571,7 @@ def gauge_slash(raw_args="", session_id=None, **_kwargs):
     incident report page, ``/gauge config`` for the preferences."""
     original = (raw_args or "").strip()
     head, _space, tail = original.partition(" ")
-    if head.lower() == "setup":
+    if head.lower() in ("setup", "memory"):
         return _slash_setup(tail.split())
     if head.lower() == "review":
         return _slash_review(tail.split())

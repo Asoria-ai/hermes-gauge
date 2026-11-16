@@ -20,8 +20,8 @@ def register(ctx):
         register_command(
             "gauge",
             tools.gauge_slash,
-            "Show this session's fill, a report, past peaks, the context-setup checklist, a review, an incident report, or the preferences.",
-            "[report|audit|setup|review|incidents|md|json|config]",
+            "Show this session's fill, a report, past peaks, the memory and skills checklist, a review, an incident report, or the preferences.",
+            "[report|audit|memory|setup|review|incidents|md|json|config]",
         )
     # post_llm_call only runs after a successful turn. Streaming chunks, a
     # stream that dies, and provider errors are separate Hermes hooks — the

@@ -3011,7 +3011,7 @@ def test_slash_setup_and_review_do_not_edit_files(tmp_path, monkeypatch):
     assert "Report only" in review
     assert "Do not edit any file" in review
     applied = tools.gauge_slash("review apply")
-    assert "You may edit only" in applied
+    assert "The split plan is empty. Do not edit any file." in applied
 
     pinned = tools.gauge_slash("review model z-ai/glm-5.3-flash provider openrouter")
     assert "z-ai/glm-5.3-flash" in pinned
@@ -3031,3 +3031,26 @@ def test_gauge_setup_returns_the_checklist_without_calling_doctor(tmp_path, monk
     assert result["status"] == "OK"
     assert "text" in result and "markdown" in result
     assert "doctor" not in result
+
+
+def test_the_scheduled_review_reads_its_mode_from_the_preferences(tmp_path, monkeypatch):
+    monkeypatch.setattr(tools, "_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(tools, "_DATA_DIR", tmp_path / "data")
+    config = tmp_path / "gauge.yaml"
+    config.write_text("memory:\n  level: standard\n  review_mode: report\n", encoding="utf-8")
+    monkeypatch.setattr(tools, "_CONFIG_PATH", config)
+    skill = tmp_path / "skills" / "ops" / "deploy" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\nname: deploy\ndescription: Deploy.\n---\n" + "word " * 20_000, encoding="utf-8")
+
+    nightly = tools.gauge_setup({"action": "review", "scheduled": True})
+    assert "Report only. Do not edit any file." in nightly["brief"]
+    assert nightly["skills"]["split_plan"][0]["rel"] == "ops/deploy/SKILL.md"
+
+    config.write_text("memory:\n  level: standard\n  review_mode: split\n", encoding="utf-8")
+    nightly = tools.gauge_setup({"action": "review", "scheduled": True})
+    assert "only the own skills listed" in nightly["brief"]
+    assert nightly["limits"]["review_mode"] == "split"
+    assert skill.read_text(encoding="utf-8").count("word") == 20_000
+
+    assert tools.gauge_slash("memory").startswith("# Hermes Gauge — Context setup —")

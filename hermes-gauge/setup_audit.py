@@ -37,14 +37,41 @@ _JOB_ID = re.compile(r"(?:Created|Updated) job:\s*([0-9a-fA-F]{6,})")
 _CLOCK = re.compile(r"^(\d{1,2}):(\d{2})$")
 _EVERY = re.compile(r"^(\d+)([hd])$")
 
+# Defaults match the ``standard`` memory level in prefs.py.
+DEFAULT_LIMITS = {
+    "level": "standard",
+    "turn_tokens": TURN_TOKEN_CAP,
+    "fill_alert": BUDGET_ALERT,
+    "skill_warn_tokens": SKILL_WARN_TOKENS,
+    "skill_split_tokens": SKILL_SPLIT_TOKENS,
+    "unused_days": UNUSED_DAYS,
+    "review_mode": "report",
+    "split_sources": ["own"],
+    "skip_categories": [],
+}
+# The prompt reads the mode at run time: the brief says whether this run may edit.
 REVIEW_PROMPT = (
     "You are running the Hermes Gauge context review. "
-    "Call gauge_setup first and follow the gauge-context-review skill. "
-    "Report what is paid on every turn, which of the user's own skills are "
-    "over 15,000 tokens, and which files you will not change. "
-    "Do not edit any file. Official, community, and external skills stay "
-    "as published. Write the report as your final message."
+    "Call gauge_setup with action review and scheduled true, then follow the "
+    "brief it returns and the gauge-context-review skill. The brief says "
+    "whether this run may edit, and lists the only files you may change. "
+    "Official, community, and external skills stay as published. "
+    "Write the report as your final message: what is paid on every turn, "
+    "what you split (tokens before and after), and what you left alone."
 )
+
+
+def resolve_limits(limits=None):
+    """``DEFAULT_LIMITS`` with the user's values on top. Unknown keys are ignored."""
+    merged = {key: (list(value) if isinstance(value, list) else value) for key, value in DEFAULT_LIMITS.items()}
+    for key, value in dict(limits or {}).items():
+        if key in merged and value is not None:
+            merged[key] = list(value) if isinstance(value, (list, tuple)) else value
+    return merged
+
+
+def _num(value):
+    return f"{int(value):,}"
 
 
 def estimate_tokens(chars):
@@ -177,7 +204,16 @@ def _protected_author(author):
     return bool(words & {"hermes", "nous", "nousresearch"})
 
 
-def _skill_record(path, rel, kind):
+def _category(path, root):
+    """The folder above the skill folder: ``devops`` in ``devops/deploy/SKILL.md``."""
+    try:
+        parts = Path(path).relative_to(root).parts
+    except ValueError:
+        return ""
+    return parts[-3].lower() if len(parts) >= 3 else ""
+
+
+def _skill_record(path, rel, kind, category=""):
     text = _read(path)
     try:
         size = Path(path).stat().st_size
@@ -187,11 +223,15 @@ def _skill_record(path, rel, kind):
     description = _fm_text(fm, "description")
     author = _fm_text(fm, "author")
     name = _fm_text(fm, "name") or Path(rel).parent.name
+    source = kind
     if kind in ("own", "project") and (_protected_author(author) or _published(fm)):
         kind = "protected"
+        source = "published"
     return {
         "rel": rel,
         "kind": kind,
+        "source": source,
+        "category": category,
         "name": name,
         "tokens": estimate_tokens(size),
         "description": description,
@@ -222,28 +262,30 @@ def _check(checks, severity, area, ok, detail):
     })
 
 
-def _memory_file(checks, lang, label, path, budget, kind):
+def _memory_file(checks, lang, label, path, budget, kind, lim):
     if not path.is_file():
         return None
     chars = len(_read(path))
     tokens = estimate_tokens(chars)
+    cap = lim["turn_tokens"]
+    alert_at = round(lim["fill_alert"] * 100)
     fill = round(chars / budget, 4) if budget else None
-    over_tokens = tokens > TURN_TOKEN_CAP
-    over_budget = fill is not None and fill > BUDGET_ALERT
+    over_tokens = tokens > cap
+    over_budget = fill is not None and fill > lim["fill_alert"]
     if lang == "fr":
         budget_bit = f", {round(fill * 100)}% du plafond de {budget} caractères" if fill is not None else ""
         detail = f"{label} : {tokens} jetons ({chars} caractères{budget_bit})."
         if over_tokens:
-            detail += f" Au-dessus de {TURN_TOKEN_CAP} jetons, collé à chaque tour."
+            detail += f" Au-dessus de {cap} jetons, collé à chaque tour."
         elif over_budget:
-            detail += " Au-dessus de 90% du plafond : la prochaine écriture échoue."
+            detail += f" Au-dessus de {alert_at}% du plafond : la prochaine écriture peut échouer."
     else:
         budget_bit = f", {round(fill * 100)}% of the {budget}-character cap" if fill is not None else ""
         detail = f"{label}: {tokens} tokens ({chars} characters{budget_bit})."
         if over_tokens:
-            detail += f" Over the {TURN_TOKEN_CAP}-token cap, and it is pasted every turn."
+            detail += f" Over the {cap}-token cap, and it is pasted every turn."
         elif over_budget:
-            detail += " Over 90% of its cap: the next write fails."
+            detail += f" Over {alert_at}% of its cap: the next write can fail."
     severity = "alert" if over_tokens or over_budget else "ok"
     _check(checks, severity, "memory", severity == "ok", detail)
     return {"label": label, "kind": kind, "chars": chars, "tokens": tokens, "fill": fill}
@@ -278,7 +320,7 @@ def _exact_duplicates(checks, lang, files):
     _check(checks, "warn", "memory", False, detail)
 
 
-def _scan_memory(checks, lang, home, config_text):
+def _scan_memory(checks, lang, home, config_text, lim):
     scalars, _lists = _scalars_and_lists(_top_block(config_text, "memory"))
     provider = (scalars.get("provider") or "builtin").strip().strip("'\"")
     try:
@@ -304,7 +346,7 @@ def _scan_memory(checks, lang, home, config_text):
         ):
             path = directory / filename
             label = f"{name}/{filename}"
-            row = _memory_file(checks, lang, label, path, budget, kind)
+            row = _memory_file(checks, lang, label, path, budget, kind, lim)
             if row:
                 stores.append(row)
                 texts.append((label, _read(path)))
@@ -312,15 +354,16 @@ def _scan_memory(checks, lang, home, config_text):
     if soul.is_file():
         chars = len(_read(soul))
         tokens = estimate_tokens(chars)
-        over = tokens > TURN_TOKEN_CAP
+        cap = lim["turn_tokens"]
+        over = tokens > cap
         if lang == "fr":
             detail = f"SOUL.md : {tokens} jetons."
             if over:
-                detail += f" Au-dessus de {TURN_TOKEN_CAP}, collé à chaque tour."
+                detail += f" Au-dessus de {cap}, collé à chaque tour."
         else:
             detail = f"SOUL.md: {tokens} tokens."
             if over:
-                detail += f" Over the {TURN_TOKEN_CAP}-token cap, and it is pasted every turn."
+                detail += f" Over the {cap}-token cap, and it is pasted every turn."
         _check(checks, "alert" if over else "ok", "memory", not over, detail)
         stores.append({"label": "SOUL.md", "kind": "soul", "chars": chars, "tokens": tokens, "fill": None})
     _exact_duplicates(checks, lang, texts)
@@ -332,7 +375,7 @@ def _scan_memory(checks, lang, home, config_text):
     return {"provider": provider, "stores": stores}
 
 
-def _scan_recall(checks, lang, home, provider):
+def _scan_recall(checks, lang, home, provider, lim):
     path = home / "hindsight" / "config.json"
     recall = None
     retain = None
@@ -368,7 +411,8 @@ def _scan_recall(checks, lang, home, provider):
         retain_n = int(retain) if retain is not None else None
     except (TypeError, ValueError):
         retain_n = None
-    over = recall_n is not None and recall_n > TURN_TOKEN_CAP
+    cap = lim["turn_tokens"]
+    over = recall_n is not None and recall_n > cap
     every_turn = retain_n == 1
     if lang == "fr":
         detail = f"Rappel {provider} : {recall_n if recall_n is not None else '—'} jetons"
@@ -376,7 +420,7 @@ def _scan_recall(checks, lang, home, provider):
             detail += f", retenu toutes les {retain_n} tours" if retain_n != 1 else ", retenu à chaque tour"
         detail += "."
         if over:
-            detail += f" Au-dessus de {TURN_TOKEN_CAP}."
+            detail += f" Au-dessus de {cap}."
         if every_turn:
             detail += " Retenir à chaque tour remplit la banque."
     else:
@@ -385,7 +429,7 @@ def _scan_recall(checks, lang, home, provider):
             detail += ", retained every turn" if retain_n == 1 else f", retained every {retain_n} turns"
         detail += "."
         if over:
-            detail += f" Over the {TURN_TOKEN_CAP}-token cap."
+            detail += f" Over the {cap}-token cap."
         if every_turn:
             detail += " Retaining every turn fills the bank."
     severity = "alert" if over else ("warn" if every_turn else "ok")
@@ -393,7 +437,46 @@ def _scan_recall(checks, lang, home, provider):
     return {"provider": provider, "recall_max_tokens": recall_n, "retain_every_n_turns": retain_n}
 
 
-def _scan_skills(checks, notes, lang, home, config_text, project):
+def _policy(item, lim):
+    """``split`` (may be split), ``skip`` (category excluded), ``report``, or ``leave``."""
+    if item["source"] not in ("own", "project"):
+        return "leave"
+    if item["source"] not in lim["split_sources"]:
+        return "report"
+    if item["category"] and item["category"] in lim["skip_categories"]:
+        return "skip"
+    return "split"
+
+
+def _groups(skills, lim):
+    """One row per source and category, largest index cost first."""
+    rows = {}
+    for item in skills:
+        key = (item["source"], item["category"])
+        row = rows.setdefault(key, {
+            "source": item["source"],
+            "category": item["category"] or "-",
+            "count": 0,
+            "index_tokens": 0,
+            "tokens": 0,
+            "long": 0,
+            "to_split": 0,
+            "policy": item["policy"],
+        })
+        row["count"] += 1
+        row["index_tokens"] += item["index_tokens"]
+        row["tokens"] += item["tokens"]
+        if item["tokens"] >= lim["skill_warn_tokens"]:
+            row["long"] += 1
+        if item["policy"] == "split" and item["tokens"] >= lim["skill_split_tokens"]:
+            row["to_split"] += 1
+    order = {"own": 0, "project": 1, "published": 2, "external": 3}
+    return sorted(rows.values(), key=lambda row: (order.get(row["source"], 9), -row["index_tokens"], row["category"]))
+
+
+def _scan_skills(checks, notes, lang, home, config_text, project, lim):
+    warn_at = lim["skill_warn_tokens"]
+    split_at = lim["skill_split_tokens"]
     _scalars, lists = _scalars_and_lists(_top_block(config_text, "plugins"))
     disabled = [item.lower() for item in lists.get("disabled", [])]
     _skill_scalars, skill_lists = _scalars_and_lists(_top_block(config_text, "skills"))
@@ -403,53 +486,61 @@ def _scan_skills(checks, notes, lang, home, config_text, project):
         if path.is_dir():
             external.append(path.resolve())
     skills = []
-    for path in _iter_skills(home / "skills"):
-        rel = str(path.relative_to(home / "skills"))
-        skills.append(_skill_record(path, rel, "own"))
+    own_root = home / "skills"
+    for path in _iter_skills(own_root):
+        rel = str(path.relative_to(own_root))
+        skills.append(_skill_record(path, rel, "own", _category(path, own_root)))
     for root in external:
         for path in _iter_skills(root):
             rel = f"external:{root.name}/{path.relative_to(root)}"
-            skills.append(_skill_record(path, rel, "external"))
+            skills.append(_skill_record(path, rel, "external", root.name.lower()))
     if project is not None:
         project = Path(project)
         for folder in ("skills", Path(".hermes") / "skills"):
             for path in _iter_skills(project / folder):
                 rel = str(path.relative_to(project))
-                skills.append(_skill_record(path, rel, "project"))
+                skills.append(_skill_record(path, rel, "project", _category(path, project / folder)))
+    for item in skills:
+        item["policy"] = _policy(item, lim)
     index_tokens = sum(item["index_tokens"] for item in skills)
     long_desc = [item for item in skills if item["description_chars"] > DESCRIPTION_CHARS]
     own_warn = [
         item for item in skills
-        if item["kind"] in ("own", "project") and item["tokens"] >= SKILL_WARN_TOKENS
+        if item["kind"] in ("own", "project") and item["tokens"] >= warn_at
     ]
     own_split = [
         item for item in skills
-        if item["kind"] in ("own", "project") and item["tokens"] >= SKILL_SPLIT_TOKENS
+        if item["kind"] in ("own", "project") and item["tokens"] >= split_at
     ]
     protected_long = [
         item for item in skills
-        if item["kind"] != "own" and item["tokens"] >= SKILL_WARN_TOKENS
+        if item["kind"] != "own" and item["tokens"] >= warn_at
     ]
+    split_plan = sorted(
+        (item for item in skills if item["policy"] == "split" and item["tokens"] >= split_at),
+        key=lambda item: -item["tokens"],
+    )
     if not skills:
         detail = "Aucune skill locale." if lang == "fr" else "No local skills."
         _check(checks, "ok", "skills", True, detail)
     else:
+        cap = lim["turn_tokens"]
         if lang == "fr":
             detail = (
                 f"Index des skills : {index_tokens} jetons, "
                 f"{len(skills)} descriptions, collé à chaque tour."
             )
-            if index_tokens > TURN_TOKEN_CAP:
-                detail += f" Au-dessus de {TURN_TOKEN_CAP}."
+            if index_tokens > cap:
+                detail += f" Au-dessus de {cap}."
         else:
             detail = (
                 f"Skill index: {index_tokens} tokens across {len(skills)} descriptions, "
                 "pasted every turn."
             )
-            if index_tokens > TURN_TOKEN_CAP:
-                detail += f" Over the {TURN_TOKEN_CAP}-token cap."
-        severity = "alert" if index_tokens > TURN_TOKEN_CAP else (
-            "warn" if index_tokens > int(TURN_TOKEN_CAP * 0.75) else "ok"
+            if index_tokens > cap:
+                detail += f" Over the {cap}-token cap."
+        severity = "alert" if index_tokens > cap else (
+            "warn" if index_tokens > int(cap * 0.75) else "ok"
         )
         _check(checks, severity, "skills", severity == "ok", detail)
     if long_desc:
@@ -466,24 +557,24 @@ def _scan_skills(checks, notes, lang, home, config_text, project):
         )
         if lang == "fr":
             detail = (
-                f"{len(own_warn)} skills à vous dépassent {SKILL_WARN_TOKENS} jetons"
+                f"{len(own_warn)} skills à vous dépassent {warn_at} jetons"
                 f"{' — à découper' if own_split else ''} : {shown}."
             )
         else:
             detail = (
-                f"{len(own_warn)} of your skills are over {SKILL_WARN_TOKENS} tokens"
+                f"{len(own_warn)} of your skills are over {warn_at} tokens"
                 f"{' — split them' if own_split else ''} : {shown}."
             )
         _check(checks, "alert" if own_split else "warn", "skills", False, detail)
     if protected_long:
         if lang == "fr":
             note = (
-                f"{len(protected_long)} skills publiées dépassent {SKILL_WARN_TOKENS} jetons. "
+                f"{len(protected_long)} skills publiées dépassent {warn_at} jetons. "
                 "On ne les réécrit pas."
             )
         else:
             note = (
-                f"{len(protected_long)} published skills are over {SKILL_WARN_TOKENS} tokens. "
+                f"{len(protected_long)} published skills are over {warn_at} tokens. "
                 "Leave them as published."
             )
         notes.append(note)
@@ -520,11 +611,24 @@ def _scan_skills(checks, notes, lang, home, config_text, project):
         ],
         "external_dirs": [str(root) for root in external],
         "omh_disabled": omh_disabled,
+        "groups": _groups(skills, lim),
+        "split_plan": [
+            {
+                "rel": item["rel"],
+                "source": item["source"],
+                "category": item["category"] or "-",
+                "tokens": item["tokens"],
+            }
+            for item in split_plan
+        ],
         "items": [
             {
                 "name": item["name"],
                 "rel": item["rel"],
                 "kind": item["kind"],
+                "source": item["source"],
+                "category": item["category"] or "-",
+                "policy": item["policy"],
                 "tokens": item["tokens"],
                 "index_tokens": item["index_tokens"],
             }
@@ -533,7 +637,7 @@ def _scan_skills(checks, notes, lang, home, config_text, project):
     }
 
 
-def _scan_project(checks, lang, project):
+def _scan_project(checks, lang, project, lim):
     if project is None:
         return None
     project = Path(project)
@@ -561,15 +665,16 @@ def _scan_project(checks, lang, project):
         chars = len(_read(path))
         tokens = estimate_tokens(chars)
         rel = str(path.relative_to(project))
-        over = tokens > TURN_TOKEN_CAP
+        cap = lim["turn_tokens"]
+        over = tokens > cap
         if lang == "fr":
             detail = f"{rel} : {tokens} jetons, collé dans ce projet."
             if over:
-                detail += f" Au-dessus de {TURN_TOKEN_CAP}."
+                detail += f" Au-dessus de {cap}."
         else:
             detail = f"{rel}: {tokens} tokens, pasted on every turn in this project."
             if over:
-                detail += f" Over the {TURN_TOKEN_CAP}-token cap."
+                detail += f" Over the {cap}-token cap."
         _check(checks, "alert" if over else "ok", "project", not over, detail)
         rows.append({"rel": rel, "tokens": tokens, "chars": chars})
     if not rows:
@@ -664,8 +769,8 @@ def _load_usage(home):
     return found
 
 
-def _use_state(usage, name, now):
-    """``recent``, ``stale`` (used, but not in 7 days), ``never``, ``pinned``, or ``unknown``."""
+def _use_state(usage, name, now, days=UNUSED_DAYS):
+    """``recent``, ``stale`` (used, not in ``days``), ``never``, ``pinned``, or ``unknown``."""
     if usage is None:
         return "unknown"
     row = usage.get(name)
@@ -676,7 +781,7 @@ def _use_state(usage, name, now):
     last = row["last_used"]
     if last is None:
         return "never" if row["use_count"] == 0 else "unknown"
-    if now - last > UNUSED_DAYS * 86400:
+    if now - last > days * 86400:
         return "stale" if row["use_count"] else "never"
     return "recent"
 
@@ -687,13 +792,13 @@ def _share(save, total):
     return round(100.0 * save / total)
 
 
-def _unused_priority(lang, total, group, stale, always_on):
+def _unused_priority(lang, total, group, stale, always_on, days=UNUSED_DAYS):
     save = sum(item["index_tokens"] for item in group)
     confidence = "medium" if stale else "high"
     if lang == "fr":
         title = "Skills non utilisées dans l'index"
         what = (
-            f"{total} skills, {len(group)} sans usage depuis {UNUSED_DAYS} jours. "
+            f"{total} skills, {len(group)} sans usage depuis {days} jours. "
             "Leur description est collée à chaque tour."
         )
         reco = (
@@ -709,7 +814,7 @@ def _unused_priority(lang, total, group, stale, always_on):
     else:
         title = "Unused skills in the index"
         what = (
-            f"{total} skills, {len(group)} not used in the last {UNUSED_DAYS} days. "
+            f"{total} skills, {len(group)} not used in the last {days} days. "
             "Every description is pasted on every turn."
         )
         reco = (
@@ -734,8 +839,10 @@ def _unused_priority(lang, total, group, stale, always_on):
     }
 
 
-def _split_priority(lang, group):
-    save = sum(max(item["tokens"] - TURN_TOKEN_CAP, 0) for item in group)
+def _split_priority(lang, group, lim=None):
+    lim = resolve_limits(lim)
+    save = sum(max(item["tokens"] - lim["turn_tokens"], 0) for item in group)
+    warn_at = lim["skill_warn_tokens"]
     shown = ", ".join(
         f"{item['rel']} ({item['tokens']})"
         for item in sorted(group, key=lambda item: -item["tokens"])[:3]
@@ -745,7 +852,7 @@ def _split_priority(lang, group):
         what = (
             f"{len(group)} skill{'s' if len(group) != 1 else ''} à vous "
             f"{'dépassent' if len(group) != 1 else 'dépasse'} "
-            f"{SKILL_WARN_TOKENS} jetons à l'ouverture : {shown}."
+            f"{warn_at} jetons à l'ouverture : {shown}."
         )
         reco = (
             "Un SKILL.md court, la procédure dans references/. "
@@ -760,7 +867,7 @@ def _split_priority(lang, group):
         title = "Split skills that are too long"
         what = (
             f"{len(group)} of your skills "
-            f"{'are' if len(group) != 1 else 'is'} over {SKILL_WARN_TOKENS} tokens "
+            f"{'are' if len(group) != 1 else 'is'} over {warn_at} tokens "
             f"when opened: {shown}."
         )
         reco = (
@@ -784,35 +891,41 @@ def _split_priority(lang, group):
     }
 
 
-def _priorities(lang, items, usage, always_on, now):
+def _priorities(lang, items, usage, always_on, now, lim=None):
     """Biggest cuts first. Every-turn savings outrank a saving that only happens when a skill is opened."""
+    lim = resolve_limits(lim)
     found = []
     if usage is not None and items:
         never = []
         stale = []
         for item in items:
-            state = _use_state(usage, item["name"], now)
+            state = _use_state(usage, item["name"], now, lim["unused_days"])
             if state == "never":
                 never.append(item)
             elif state == "stale":
                 stale.append(item)
         unused = never + stale
         if unused:
-            found.append(_unused_priority(lang, len(items), unused, bool(stale), always_on))
+            found.append(_unused_priority(lang, len(items), unused, bool(stale), always_on, lim["unused_days"]))
     splits = [
         item for item in items
-        if item["kind"] in ("own", "project") and item["tokens"] >= SKILL_WARN_TOKENS
+        if item["kind"] in ("own", "project") and item["tokens"] >= lim["skill_warn_tokens"]
     ]
     if splits:
-        found.append(_split_priority(lang, splits))
+        found.append(_split_priority(lang, splits, lim))
     found.sort(key=lambda item: (0 if item["save_scope"] == "every_turn" else 1, -item["save_tokens"]))
     for rank, item in enumerate(found, start=1):
         item["rank"] = rank
     return found
 
 
-def scan(home, project=None, lang="en", now=None):
-    """The checklist for one Hermes home. Does not write."""
+def scan(home, project=None, lang="en", now=None, limits=None):
+    """The checklist for one Hermes home. Does not write.
+
+    ``limits`` comes from ``prefs.memory_limits``. Missing keys keep the
+    ``standard`` level.
+    """
+    lim = resolve_limits(limits)
     home = Path(home)
     if project:
         project = Path(project).expanduser()
@@ -820,10 +933,10 @@ def scan(home, project=None, lang="en", now=None):
     checks = []
     notes = []
     config_text = _read(home / "config.yaml") if (home / "config.yaml").is_file() else ""
-    memory = _scan_memory(checks, lang, home, config_text)
-    recall = _scan_recall(checks, lang, home, memory["provider"])
-    skills = _scan_skills(checks, notes, lang, home, config_text, project)
-    project_info = _scan_project(checks, lang, project)
+    memory = _scan_memory(checks, lang, home, config_text, lim)
+    recall = _scan_recall(checks, lang, home, memory["provider"], lim)
+    skills = _scan_skills(checks, notes, lang, home, config_text, project, lim)
+    project_info = _scan_project(checks, lang, project, lim)
     telegram = _scan_telegram(checks, lang, config_text)
     always = [row["tokens"] for row in memory["stores"]]
     always.append(skills["index_tokens"])
@@ -833,17 +946,19 @@ def scan(home, project=None, lang="en", now=None):
     moment = time.time() if now is None else float(now)
     usage = _load_usage(home)
     if usage is None and skills["count"]:
+        days = lim["unused_days"]
         note = (
-            "Pas de skills/.usage.json : les skills inutilisées depuis 7 jours ne sont pas comptées."
+            f"Pas de skills/.usage.json : les skills inutilisées depuis {days} jours ne sont pas comptées."
             if lang == "fr" else
-            "No skills/.usage.json, so skills unused in the last 7 days are not counted."
+            f"No skills/.usage.json, so skills unused in the last {days} days are not counted."
         )
         notes.append(note)
-    priorities = _priorities(lang, skills.get("items") or [], usage, always_on, moment)
+    priorities = _priorities(lang, skills.get("items") or [], usage, always_on, moment, lim)
     return {
         "lang": lang,
         "status": _status(checks),
-        "turn_token_cap": TURN_TOKEN_CAP,
+        "limits": lim,
+        "turn_token_cap": lim["turn_tokens"],
         "always_on_tokens": always_on,
         "usage_known": usage is not None,
         "priorities": priorities,
@@ -861,10 +976,69 @@ def _headline(data):
     lang = data.get("lang") or "en"
     status = data.get("status") or "OK"
     tokens = data.get("always_on_tokens") or 0
+    lim = resolve_limits(data.get("limits"))
     if lang == "fr":
         label = {"ALERT": "ALERTE", "WARN": "ATTENTION"}.get(status, "OK")
-        return f"Réglage du contexte — {label}", f"Bloc collé à chaque tour : environ {tokens} jetons."
-    return f"Context setup — {status}", f"Pasted every turn: about {tokens} tokens."
+        return (
+            f"Réglage du contexte — {label}",
+            f"Bloc collé à chaque tour : environ {tokens} jetons. "
+            f"Niveau {lim['level']}, {_num(lim['turn_tokens'])} jetons par bloc.",
+        )
+    return (
+        f"Context setup — {status}",
+        f"Pasted every turn: about {tokens} tokens. "
+        f"Level {lim['level']}, {_num(lim['turn_tokens'])} tokens per block.",
+    )
+
+
+_POLICY_WORDS = {
+    "en": {"split": "may split", "skip": "category skipped", "report": "report only", "leave": "leave as published"},
+    "fr": {"split": "découpable", "skip": "catégorie exclue", "report": "rapport seul", "leave": "laisser tel quel"},
+}
+_SOURCE_WORDS = {
+    "en": {"own": "yours", "project": "project", "published": "published", "external": "external"},
+    "fr": {"own": "à vous", "project": "projet", "published": "publiée", "external": "externe"},
+}
+
+
+def _group_rows(data):
+    """``(source, category, count, index, long, to_split, policy)`` as display strings."""
+    lang = "fr" if data.get("lang") == "fr" else "en"
+    rows = []
+    for row in (data.get("skills") or {}).get("groups") or []:
+        rows.append((
+            _SOURCE_WORDS[lang].get(row["source"], row["source"]),
+            row["category"],
+            str(row["count"]),
+            _num(row["index_tokens"]),
+            str(row["long"]),
+            str(row["to_split"]),
+            _POLICY_WORDS[lang].get(row["policy"], row["policy"]),
+        ))
+    return rows
+
+
+def _group_header(lang):
+    if lang == "fr":
+        return ("Source", "Catégorie", "Skills", "Index/tour", "Longues", "À découper", "Règle")
+    return ("Source", "Category", "Skills", "Index/turn", "Long", "To split", "Rule")
+
+
+def _mode_line(data):
+    lang = data.get("lang") or "en"
+    lim = resolve_limits(data.get("limits"))
+    plan = (data.get("skills") or {}).get("split_plan") or []
+    if lang == "fr":
+        mode = "découpe" if lim["review_mode"] == "split" else "rapport seul"
+        line = f"Revue planifiée : {mode}. Plan de découpe : {len(plan)} skill{'s' if len(plan) != 1 else ''}."
+        if lim["review_mode"] != "split" and plan:
+            line += " Pour la laisser découper : /gauge config set memory.review_mode=split"
+        return line
+    mode = "split" if lim["review_mode"] == "split" else "report only"
+    line = f"Scheduled review: {mode}. Split plan: {len(plan)} skill{'s' if len(plan) != 1 else ''}."
+    if lim["review_mode"] != "split" and plan:
+        line += " To let it split: /gauge config set memory.review_mode=split"
+    return line
 
 
 def _save_line(item, lang):
@@ -903,10 +1077,12 @@ def _priority_blocks(data):
     if not priorities:
         if not data.get("usage_known") and (data.get("skills") or {}).get("count"):
             return blocks
+        lim = resolve_limits(data.get("limits"))
+        days, warn_at = lim["unused_days"], _num(lim["skill_warn_tokens"])
         if lang == "fr":
-            blocks.append(["Pas de coupe classée. Aucune skill inutilisée depuis 7 jours, et aucune skill à vous au-dessus de 15 000 jetons."])
+            blocks.append([f"Pas de coupe classée. Aucune skill inutilisée depuis {days} jours, et aucune skill à vous au-dessus de {warn_at} jetons."])
         else:
-            blocks.append(["No ranked cut. No skill unused in the last 7 days, and no own skill over 15,000 tokens."])
+            blocks.append([f"No ranked cut. No skill unused in the last {days} days, and no own skill over {warn_at} tokens."])
         return blocks
     what, reco, save, confidence = (
         ("Quoi", "Reco", "Gain", "Confiance") if lang == "fr"
@@ -940,6 +1116,12 @@ def render_text(data):
     if passed:
         word = "contrôles au vert" if data.get("lang") == "fr" else "checks passed"
         lines.append(f"{len(passed)} {word}.")
+    groups = _group_rows(data)
+    if groups:
+        lines.extend(["", "Skills par source et catégorie :" if data.get("lang") == "fr" else "Skills by source and category:"])
+        for row in groups:
+            lines.append(f"- {row[0]} / {row[1]}: {row[2]} skills, index {row[3]} tok, {row[4]} long, {row[5]} to split — {row[6]}")
+        lines.append(_mode_line(data))
     review = data.get("review") or {}
     model = (review.get("model") or "").strip()
     provider = (review.get("provider") or "").strip()
@@ -984,6 +1166,14 @@ def render_markdown(data):
         lines.append(f"- **{mark}** — {item['detail']}")
     for note in data.get("notes") or []:
         lines.append(f"- {note}")
+    groups = _group_rows(data)
+    if groups:
+        header = _group_header(data.get("lang") or "en")
+        title = "Skills par source et catégorie" if data.get("lang") == "fr" else "Skills by source and category"
+        lines.extend(["", f"## {title}", "", "| " + " | ".join(header) + " |", "|" + "---|" * len(header)])
+        for row in groups:
+            lines.append("| " + " | ".join(row) + " |")
+        lines.extend(["", _mode_line(data)])
     lines.append("")
     return "\n".join(lines)
 
@@ -1004,6 +1194,8 @@ def render_html(data, extra=""):
         "article{border-top:1px solid #245c56;padding:16px 0;}",
         ".k{color:#E8B54A;}",
         "pre{white-space:pre-wrap;}",
+        "table{border-collapse:collapse;font-size:14px;}",
+        "th,td{border-bottom:1px solid #245c56;padding:4px 10px;text-align:left;}",
         "</style>",
         "</head>",
         "<body>",
@@ -1017,6 +1209,15 @@ def render_html(data, extra=""):
             label, _, rest = line.partition(": ")
             parts.append(f"<p><span class=\"k\">{_escape(label)}.</span> {_escape(rest)}</p>")
         parts.append("</article>")
+    groups = _group_rows(data)
+    if groups:
+        title = "Skills par source et catégorie" if lang == "fr" else "Skills by source and category"
+        parts.append(f"<h2>{title}</h2><table><tr>")
+        parts.extend(f"<th>{_escape(cell)}</th>" for cell in _group_header(lang))
+        parts.append("</tr>")
+        for row in groups:
+            parts.append("<tr>" + "".join(f"<td>{_escape(cell)}</td>" for cell in row) + "</tr>")
+        parts.append(f"</table><p>{_escape(_mode_line(data))}</p>")
     if extra:
         title = "Revue" if lang == "fr" else "Review"
         parts.append(f"<h2>{title}</h2>")
@@ -1039,48 +1240,90 @@ def _model_note(lang):
     )
 
 
-def brief(data, apply=False):
-    """Instructions for the model. The plugin does not edit files."""
+def brief(data, apply=False, scheduled=False):
+    """Instructions for the model. The plugin does not edit files.
+
+    ``apply`` is ``/gauge review apply``. A scheduled run may edit only when
+    ``memory.review_mode`` is ``split``. Either way the only files it may touch
+    are the skills on the split plan.
+    """
     lang = data.get("lang") or "en"
-    own = (data.get("skills") or {}).get("own_over") or []
+    lim = resolve_limits(data.get("limits"))
+    skills = data.get("skills") or {}
+    plan = skills.get("split_plan") or []
+    own = skills.get("own_over") or []
+    on_plan = {item["rel"] for item in plan}
+    long_only = [item for item in own if item["rel"] not in on_plan]
+    may_edit = bool(apply) or (bool(scheduled) and lim["review_mode"] == "split")
+    turn, warn_at, split_at = _num(lim["turn_tokens"]), _num(lim["skill_warn_tokens"]), _num(lim["skill_split_tokens"])
+    sources = ", ".join(lim["split_sources"]) or "-"
+    skip = ", ".join(lim["skip_categories"])
     if lang == "fr":
-        mode = (
-            "Tu peux modifier uniquement les skills à toi listées ci-dessous."
-            if apply else
-            "Rapport seulement. Ne modifie aucun fichier."
-        )
+        if may_edit and plan:
+            mode = "Tu peux modifier uniquement les skills à toi listées ci-dessous, sur le plan de découpe. Rien d'autre."
+        elif may_edit:
+            mode = "Le plan de découpe est vide. Ne modifie aucun fichier."
+        else:
+            mode = "Rapport seulement. Ne modifie aucun fichier."
         lines = [
             mode,
             "N'écris jamais une skill officielle, communautaire, ou un clone git externe.",
-            "Une skill à toi au-dessus de 20 000 jetons se découpe : un SKILL.md court, le reste dans references/.",
-            "MEMORY.md et USER.md restent sous leur plafond de caractères, et sous 2 000 jetons.",
+            f"Découper : SKILL.md reste sous {turn} jetons (quand l'utiliser, et la carte des étapes). "
+            "La procédure, les exemples et les tables vont dans references/<sujet>.md à côté. "
+            "Garde le name et la description du frontmatter. Ne change pas ce que fait la skill.",
+            f"MEMORY.md et USER.md restent sous leur plafond de caractères, et sous {turn} jetons.",
         ]
-        if own:
-            lines.append("Skills à toi au-dessus de 15 000 jetons :")
-            lines.extend(f"- {item['rel']} ({item['tokens']} jetons)" for item in own)
+        if skip:
+            lines.append(f"Ne touche jamais ces catégories : {skip}.")
+        if plan:
+            lines.append(f"Plan de découpe (au-dessus de {split_at} jetons, sources : {sources}) :")
+            lines.extend(f"- {item['rel']} ({item['category']}, {item['tokens']} jetons)" for item in plan)
         else:
-            lines.append("Aucune skill à toi au-dessus de 15 000 jetons.")
-        if not apply:
-            lines.append("Pour autoriser une modification : /gauge review apply")
+            lines.append(f"Plan de découpe : vide. Aucune skill découpable au-dessus de {split_at} jetons.")
+        if long_only:
+            lines.append(f"Longues, rapport seul (au-dessus de {warn_at} jetons, hors plan) :")
+            lines.extend(f"- {item['rel']} ({item['tokens']} jetons)" for item in long_only)
+        if not may_edit:
+            lines.append(
+                "Pour laisser la revue planifiée découper : /gauge config set memory.review_mode=split"
+                if scheduled else
+                "Pour autoriser une modification : /gauge review apply"
+            )
+        elif plan:
+            lines.append("Dans le rapport final, liste chaque découpe : chemin, jetons avant, jetons après.")
+        return "\n".join(lines)
+    if may_edit and plan:
+        mode = "You may edit only the own skills listed below, on the split plan. Nothing else."
+    elif may_edit:
+        mode = "The split plan is empty. Do not edit any file."
     else:
-        mode = (
-            "You may edit only the own skills listed below."
-            if apply else
-            "Report only. Do not edit any file."
+        mode = "Report only. Do not edit any file."
+    lines = [
+        mode,
+        "Never rewrite an official, community, or external git skill.",
+        f"How to split: SKILL.md stays under {turn} tokens (when to use it, and a map of the steps). "
+        "The procedure, examples and tables move to references/<topic>.md next to it. "
+        "Keep the frontmatter name and description. Do not change what the skill does.",
+        f"MEMORY.md and USER.md stay inside their character cap, and under {turn} tokens.",
+    ]
+    if skip:
+        lines.append(f"Never touch these categories: {skip}.")
+    if plan:
+        lines.append(f"Split plan (over {split_at} tokens, sources: {sources}):")
+        lines.extend(f"- {item['rel']} ({item['category']}, {item['tokens']} tokens)" for item in plan)
+    else:
+        lines.append(f"Split plan: empty. No splittable skill is over {split_at} tokens.")
+    if long_only:
+        lines.append(f"Long, report only (over {warn_at} tokens, not on the plan):")
+        lines.extend(f"- {item['rel']} ({item['tokens']} tokens)" for item in long_only)
+    if not may_edit:
+        lines.append(
+            "To let the scheduled review split: /gauge config set memory.review_mode=split"
+            if scheduled else
+            "To allow an edit: /gauge review apply"
         )
-        lines = [
-            mode,
-            "Never rewrite an official, community, or external git skill.",
-            "An own skill over 20,000 tokens splits into a short SKILL.md plus references/.",
-            "MEMORY.md and USER.md stay inside their character cap, and under 2,000 tokens.",
-        ]
-        if own:
-            lines.append("Own skills over 15,000 tokens:")
-            lines.extend(f"- {item['rel']} ({item['tokens']} tokens)" for item in own)
-        else:
-            lines.append("No own skill is over 15,000 tokens.")
-        if not apply:
-            lines.append("To allow an edit: /gauge review apply")
+    elif plan:
+        lines.append("In the final report, list each split: path, tokens before, tokens after.")
     return "\n".join(lines)
 
 

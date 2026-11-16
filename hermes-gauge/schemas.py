@@ -128,12 +128,15 @@ GAUGE_SETUP = {
     "description": (
         "Checklist of what is pasted into context on every turn: MEMORY.md, "
         "USER.md, SOUL.md, the skill-index descriptions, an external recall "
-        "cap, and an optional project AGENTS.md. Estimates use characters // 4 "
-        "and flags anything over 2,000 tokens. Classifies skills as yours, "
-        "published, or external, and names own skills over 15,000 tokens. "
-        "Does not edit files and does not call a model. "
+        "cap, and an optional project AGENTS.md. Estimates use characters // 4. "
+        "Limits follow the memory level the user set (lean, standard, roomy; "
+        "standard flags anything over 2,000 tokens). Groups skills by source "
+        "(yours, project, published, external) and category, and lists the "
+        "split plan. Does not edit files and does not call a model. "
         "action scan (default) measures. review adds a report-only brief. "
-        "review with apply true allows edits of your own skills only. "
+        "review with apply true allows splitting the skills on the split plan only. "
+        "review with scheduled true is the cron run; it may split only when "
+        "memory.review_mode is split. "
         "schedule saves a Hermes cron (24h 03:00 Europe/Paris, 12h, every 6h, "
         "every 2d, or off). model and provider pin the review model; empty "
         "keeps the profile default."
@@ -169,7 +172,11 @@ GAUGE_SETUP = {
             },
             "apply": {
                 "type": "boolean",
-                "description": "With action review: allow edits of your own skills. Still never rewrites published skills.",
+                "description": "With action review: allow splitting the skills on the split plan. Still never rewrites published skills.",
+            },
+            "scheduled": {
+                "type": "boolean",
+                "description": "With action review: this is the scheduled run. It may edit only when memory.review_mode is split.",
             },
         },
         "required": [],

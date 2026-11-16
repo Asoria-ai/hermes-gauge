@@ -253,3 +253,87 @@ def test_model_pin_is_passed_to_cron_and_can_be_cleared(tmp_path):
     assert "--model" not in again
     assert "--provider" not in again
 
+
+
+LEAN = {
+    "level": "lean", "turn_tokens": 1_500, "fill_alert": 0.80,
+    "skill_warn_tokens": 8_000, "skill_split_tokens": 12_000, "unused_days": 5,
+}
+
+
+def test_the_memory_level_moves_what_is_flagged(tmp_path):
+    memories = tmp_path / "memories"
+    memories.mkdir()
+    (memories / "MEMORY.md").write_text("x" * 7_000, encoding="utf-8")
+    (tmp_path / "config.yaml").write_text("memory:\n  memory_char_limit: 8000\n", encoding="utf-8")
+
+    standard = setup_audit.scan(tmp_path, lang="en")
+    assert standard["status"] == "OK"
+    assert standard["limits"]["level"] == "standard"
+    assert "Level standard, 2,000 tokens per block." in setup_audit.render_text(standard)
+
+    lean = setup_audit.scan(tmp_path, lang="en", limits=LEAN)
+    assert lean["status"] == "ALERT"
+    detail = next(item["detail"] for item in lean["checks"] if "MEMORY.md" in item["detail"])
+    assert "Over the 1500-token cap" in detail
+    assert lean["turn_token_cap"] == 1_500
+
+
+def test_skills_are_grouped_by_source_and_category_and_the_plan_follows_the_rules(tmp_path):
+    skills = tmp_path / "skills"
+    big = "word " * 20_000
+    _skill(skills / "devops" / "deploy" / "SKILL.md", big, author="Ada")
+    _skill(skills / "research" / "notes" / "SKILL.md", big, author="Ada")
+    _skill(skills / "devops" / "small" / "SKILL.md", "short", author="Ada")
+    _skill(skills / "tools" / "bundled" / "SKILL.md", big, author="Hermes Team")
+    external = tmp_path / "outside"
+    _skill(external / "catalog" / "SKILL.md", big, author="Nous")
+    (tmp_path / "config.yaml").write_text(
+        f"skills:\n  external_dirs:\n    - {external}\n", encoding="utf-8",
+    )
+    limits = {"skip_categories": ["research"], "review_mode": "report"}
+    data = setup_audit.scan(tmp_path, lang="en", limits=limits)
+
+    plan = [item["rel"] for item in data["skills"]["split_plan"]]
+    assert plan == ["devops/deploy/SKILL.md"]
+    groups = {(row["source"], row["category"]): row for row in data["skills"]["groups"]}
+    assert groups[("own", "devops")]["count"] == 2
+    assert groups[("own", "devops")]["to_split"] == 1
+    assert groups[("own", "devops")]["policy"] == "split"
+    assert groups[("own", "research")]["policy"] == "skip"
+    assert groups[("published", "tools")]["policy"] == "leave"
+    assert groups[("external", "outside")]["policy"] == "leave"
+
+    markdown = setup_audit.render_markdown(data)
+    assert "## Skills by source and category" in markdown
+    assert "| yours | devops | 2 |" in markdown
+    assert "category skipped" in markdown
+    assert "Scheduled review: report only. Split plan: 1 skill." in markdown
+
+    nightly = setup_audit.brief(data, scheduled=True)
+    assert "Report only. Do not edit any file." in nightly
+    assert "memory.review_mode=split" in nightly
+    assert "Never touch these categories: research." in nightly
+
+    data["limits"]["review_mode"] = "split"
+    allowed = setup_audit.brief(data, scheduled=True)
+    assert "only the own skills listed" in allowed
+    assert "- devops/deploy/SKILL.md (devops," in allowed
+    assert "research/notes/SKILL.md (" in allowed.split("Long, report only")[1]
+    assert "bundled" not in allowed and "catalog" not in allowed
+    assert "tokens before, tokens after" in allowed
+
+
+def test_project_skills_are_split_only_when_the_user_chose_that_source(tmp_path):
+    project = tmp_path / "client"
+    _skill(project / "skills" / "ops" / "huge" / "SKILL.md", "word " * 20_000, author="Ada")
+    own_only = setup_audit.scan(tmp_path / "home", project=project, lang="en")
+    assert own_only["skills"]["split_plan"] == []
+    assert own_only["skills"]["groups"][0]["policy"] == "report"
+    both = setup_audit.scan(tmp_path / "home", project=project, lang="en", limits={"split_sources": ["own", "project"]})
+    assert [item["rel"] for item in both["skills"]["split_plan"]] == ["skills/ops/huge/SKILL.md"]
+
+
+def test_the_cron_prompt_defers_to_the_brief():
+    assert "scheduled true" in setup_audit.REVIEW_PROMPT
+    assert "lists the only files you may change" in setup_audit.REVIEW_PROMPT
