@@ -15,6 +15,7 @@ provides_tools:
 - gauge_set_window
 - gauge_render
 - gauge_action
+- gauge_setup
 provides_hooks:
 - post_llm_call
 - on_stream_delta

@@ -14,13 +14,14 @@ def register(ctx):
     ctx.register_tool("gauge_set_window", "gauge", schemas.GAUGE_SET_WINDOW, tools.gauge_set_window)
     ctx.register_tool("gauge_render", "gauge", schemas.GAUGE_RENDER, tools.gauge_render)
     ctx.register_tool("gauge_action", "gauge", schemas.GAUGE_ACTION, tools.gauge_action)
+    ctx.register_tool("gauge_setup", "gauge", schemas.GAUGE_SETUP, tools.gauge_setup)
     register_command = getattr(ctx, "register_command", None)
     if register_command is not None:
         register_command(
             "gauge",
             tools.gauge_slash,
-            "Show this session's fill, a report of every session, an audit of past peaks, an incident report, or the preferences.",
-            "[report|audit|incidents|md|json|config]",
+            "Show this session's fill, a report, past peaks, the context-setup checklist, a review, an incident report, or the preferences.",
+            "[report|audit|setup|review|incidents|md|json|config]",
         )
     # post_llm_call only runs after a successful turn. Streaming chunks, a
     # stream that dies, and provider errors are separate Hermes hooks — the

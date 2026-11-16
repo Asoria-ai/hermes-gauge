@@ -26,7 +26,7 @@ In Hermes Desktop: Capabilities → Plugins → Install from Git, with `Sideligh
 
 1. Send a message. The Desktop chip names the conversation and a percentage of the window the model can actually use.
 2. At 60% it says WATCH. At 85% it says FULL, and a short notice asks for a summary, then `/new`. Hermes Gauge only watches; it never changes the chat.
-3. `/gauge` is one line for this conversation. `/gauge audit` is the peaks. `/gauge incidents` is the page that still shows what happened after a summary reset the counter. `/gauge window 200000` records the window when the gauge shows an em dash.
+3. `/gauge` is one line for this conversation. `/gauge audit` is the peaks. `/gauge setup` is what gets pasted on every turn. `/gauge incidents` is the page that still shows what happened after a summary reset the counter. `/gauge window 200000` records the window when the gauge shows an em dash.
 
 ## Glossary
 
@@ -211,6 +211,10 @@ The `gauge-viewer` skill answers in the user's language:
 | `/gauge report`, `/gauge md`, `/gauge json` | `gauge_report` | text, markdown, or JSON |
 | `/gauge report write` (or `md write`) | `gauge_report` with `write` | the report as a `.md` file, attached |
 | `/gauge audit` | audit | peaks, compactions, what the context is made of |
+| `/gauge setup` | `gauge_setup` | what is pasted every turn: memory, skill index, recall |
+| `/gauge review` | `gauge_setup` action `review` | the same checklist, plus a report-only brief |
+| `/gauge review apply` | `gauge_setup` | the brief may edit your own skills, and no published one |
+| `/gauge review schedule 24h 03:00 Europe/Paris` | cron | nightly review, as a file, on the model you pinned |
 | `/gauge incidents` | incident report | a verdict line and the report page, attached |
 | `/gauge config` | preferences | every setting and where its value comes from |
 | `/gauge config set key=value` | preferences | saves one or more settings to `config.yaml` |
@@ -327,6 +331,46 @@ chars_per_token          4  (default)
 
 Settings you save are written to `~/.hermes/plugin-data/hermes-gauge/config.yaml`. The file inside the plugin folder is only the defaults, so an update does not put your thresholds back.
 
+## Context setup
+
+`/gauge setup` answers a different question from `/gauge audit`. The audit is what one session went through. The setup is what Hermes pastes in before you type, on every turn: `MEMORY.md`, `USER.md`, `SOUL.md`, the skill-index descriptions, an external recall cap, and, when you pass a directory, that project's `AGENTS.md`.
+
+```text
+/gauge setup
+/gauge setup /path/to/client
+/gauge setup txt
+/gauge setup html
+```
+
+`/gauge setup` is markdown. `txt` is the same report as plain text. `html` is one self-contained page. `json` is the object, for a tool call.
+
+The first section is the ranked cuts. Each one has four lines: what it is, the recommendation, how many tokens it gives back, and a confidence that the cut does not change how the agent works. An unused skill is counted from `skills/.usage.json` when that file exists: not opened in the last 7 days. Taking its description out of the index saves that many tokens on every turn, as a share of what is pasted before the message. Splitting a long skill of yours saves tokens on the turns that open it, not on every message. The steps move to `references/` and still load on demand.
+
+Each of those blocks is estimated at 4 characters per token and flagged above 2,000 tokens. A memory file above 90% of its character cap is flagged too, because the next write fails. Skills are classed as yours, published (Hermes, Nous, or a GitHub source), or external. An own skill over 15,000 tokens is a warning. Over 20,000, the report says to split it into a short `SKILL.md` plus `references/`. Published and external skills are named and left as they are.
+
+`/gauge review` adds a brief for a model. It does not edit files. `/gauge review apply` is the only form that allows edits, and only of your own skills. The model is the profile default until you pin one:
+
+```text
+/gauge review model z-ai/glm-5.3-flash provider openrouter
+/gauge review provider openai-codex
+/gauge review provider anthropic
+/gauge review model default
+```
+
+An empty model means the profile default. A nightly pass suits `z-ai/glm-5.3-flash` when you have it. A Codex-only install leaves the model empty and sets `openai-codex`. A Claude-only install sets `anthropic` and a Sonnet-class model you already use. The plugin stores the choice. It does not call an API.
+
+```text
+/gauge review schedule 24h 03:00 Europe/Paris
+/gauge review schedule 12h
+/gauge review schedule every 6h 03:00 Europe/Paris
+/gauge review schedule every 2d 03:00 Europe/Paris
+/gauge review schedule off
+```
+
+The hour-step has to divide 24. The job is a normal Hermes cron entry, skill `gauge-context-review`, delivery `local`, so the report is a file and not a Telegram message. `/gauge review project /path/to/client` saves the directory the job runs from.
+
+A live `telegram:` block is reported as a warning. A short message still starts a turn in 0.18s, photos and PDFs are a separate queue, and the adapter reads `HERMES_TELEGRAM_TEXT_BATCH_DELAY_SECONDS` rather than that YAML key. Holding a multi-message brief belongs in the Hermes Telegram adapter. This plugin only names the finding.
+
 ## Audit
 
 `/gauge audit` answers "what did this session go through, not only where is it now". Active sessions come first, then the highest peak, and the ten leading sessions are shown. For each session:
@@ -384,7 +428,9 @@ Requires Hermes 0.22.3 or later, the first release with the `post_compaction` ho
 - **Writes**: only under `plugin-data/hermes-gauge/` in the Hermes home of the active profile (`~/.hermes` for the default profile): the readings database, your saved preferences, written reports. Reads follow the same profile.
 - **Reads outside its own data**: Hermes' `state.db`, read-only, for session titles and last activity.
 - **Shell commands**: `hermes send --quiet --to <target>`, only when `alerts.route` is `home` or `custom:`. It runs in a short background thread with a 45-second timeout.
-- **Not reachable from a tool, command or route**: `tools.gauge_audit()` called from Python with no `format` runs a setup audit. It runs `hermes doctor` (120-second timeout), reads the sizes of `AGENT.md`, `SOUL.md`, `config.yaml`, `skills/` and `plugins/`, and reads the memory files under `memories/` and `profiles/*/memories/`. It only reports; it changes nothing.
+- **Context setup**: `/gauge setup` and `gauge_setup` read `config.yaml`, `SOUL.md`, `memories/`, `profiles/*/memories/`, `skills/`, `hindsight/config.json` when it is there, and an optional project directory you name. They report. They do not edit those files.
+- **Review schedule**: `/gauge review schedule` runs `hermes cron` and writes `plugin-data/hermes-gauge/review.json` (the model pin, the project path, the job id). `/gauge review apply` returns instructions. The plugin still does not rewrite a skill itself.
+- **Not a command of its own**: `tools.gauge_audit()` called from Python with no `format` still runs the older setup audit. It runs `hermes doctor` (120-second timeout) and reads sizes. `/gauge setup` does not call `hermes doctor`.
 - **Credentials**: none read, none stored.
 
 The bare name `hermes plugins install hermes-gauge` is the catalog form. It installs the commit the Hermes plugin catalog pins, which a maintainer reviewed and which can trail the branch tip.

@@ -21,6 +21,7 @@ Answer in the user's language, French or English. Call a tool first; do not gues
 - `gauge report`, "rapport jauge" — call `gauge_report`. Lead with the summary line (active sessions and the weakest link), then the per-session detail. Pass `format=md` when the user wants a note to forward, `format=json` when they want the stable object.
 - `/gauge` is the same one-line check. `/gauge report`, `/gauge md`, and `/gauge json` are the exports. Add `write` (`/gauge report write`) to get the report as an attached `.md` file instead of a long message.
 - `/gauge audit` — peaks, compactions and what the context is made of, per session. `/gauge incidents` — the incident report page (verdict line, then the file). `/gauge config` shows the preferences; `/gauge config set key=value` changes one. These are commands for the user to run, not tools: relay their output, do not recompute it.
+- `/gauge setup` — what is pasted every turn (memory, skill index, recall, optional project `AGENTS.md`). Call `gauge_setup` for the same checklist. It does not edit files. `/gauge review` is the written pass; `/gauge review apply` may change only the user's own skills. `/gauge review schedule 24h 03:00 Europe/Paris` runs it nightly. See `gauge-context-review`.
 - "Est-ce qu'il y a eu des incidents ?", "what went wrong with my context" — point to `/gauge incidents` and read its verdict line. A compaction resets the live counter, so only the incident report counts past incidents; do not answer from `gauge_check` alone.
 
 ## How

@@ -123,6 +123,59 @@ GAUGE_SET_WINDOW = {
     },
 }
 
+GAUGE_SETUP = {
+    "name": "gauge_setup",
+    "description": (
+        "Checklist of what is pasted into context on every turn: MEMORY.md, "
+        "USER.md, SOUL.md, the skill-index descriptions, an external recall "
+        "cap, and an optional project AGENTS.md. Estimates use characters // 4 "
+        "and flags anything over 2,000 tokens. Classifies skills as yours, "
+        "published, or external, and names own skills over 15,000 tokens. "
+        "Does not edit files and does not call a model. "
+        "action scan (default) measures. review adds a report-only brief. "
+        "review with apply true allows edits of your own skills only. "
+        "schedule saves a Hermes cron (24h 03:00 Europe/Paris, 12h, every 6h, "
+        "every 2d, or off). model and provider pin the review model; empty "
+        "keeps the profile default."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["scan", "review", "schedule", "model", "provider", "project"],
+                "description": "scan (default), review, schedule, model, provider, or project.",
+            },
+            "project": {
+                "type": "string",
+                "description": "Project directory whose AGENTS.md is measured. Pass off to clear a saved path.",
+            },
+            "format": {
+                "type": "string",
+                "enum": ["md", "txt", "html", "json"],
+                "description": "md (default), txt, html, or json. /gauge setup is markdown.",
+            },
+            "schedule": {
+                "type": "string",
+                "description": "24h 03:00 Europe/Paris, 12h, every 6h, every 2d, or off.",
+            },
+            "model": {
+                "type": "string",
+                "description": "Review model id. default clears the pin and uses the profile model.",
+            },
+            "provider": {
+                "type": "string",
+                "description": "openai-codex, anthropic, openrouter, or default to clear.",
+            },
+            "apply": {
+                "type": "boolean",
+                "description": "With action review: allow edits of your own skills. Still never rewrites published skills.",
+            },
+        },
+        "required": [],
+    },
+}
+
 GAUGE_ACTION = {
     "name": "gauge_action",
     "description": (

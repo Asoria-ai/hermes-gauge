@@ -68,6 +68,8 @@ _ROUTE_SENDER = None
 _HERMES_COMMAND = None
 # Tests point this at a temporary Hermes root for the memory-bank audit.
 _HERMES_HOME = None
+# Tests replace ``hermes cron``. None runs the command.
+_CRON_RUNNER = None
 
 # Active memory bank. A fill above this share of the configured char budget
 # is an alert. Two entries are near-duplicates when the smaller token set
@@ -2403,12 +2405,162 @@ def _slash_incidents(words):
     return f"{report['verdict']['message']}\n\n{Path(report['path']).name}\n{report['media']}"
 
 
+def _run_cron(argv):
+    """Run ``hermes cron``. Tests pass ``_CRON_RUNNER`` and nothing is spawned."""
+    if _CRON_RUNNER is not None:
+        return _CRON_RUNNER(argv)
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return 1, str(exc)
+    return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+
+
+def _emit_setup(result, kind):
+    """Markdown by default. ``txt`` and ``html`` on request. ``json`` is the object."""
+    kind = (kind or "md").lower()
+    if kind == "json":
+        return json.dumps(result, ensure_ascii=False, indent=2)
+    if kind in ("txt", "text"):
+        return result.get("text") or ""
+    if kind == "html":
+        return result.get("html") or ""
+    return result.get("markdown") or result.get("text") or ""
+
+
+def gauge_setup(*args, action="scan", project=None, format=None, lang=None,
+                schedule=None, model=None, provider=None, apply=False, **kwargs):
+    """Checklist of what is pasted every turn, or the review schedule around it.
+
+    ``scan`` measures and writes nothing. ``review`` adds instructions for a
+    model; ``apply`` only widens those instructions to the user's own skills.
+    ``schedule`` creates a Hermes cron job. This function never calls a model
+    and never edits a skill.
+    """
+    for value in args:
+        if isinstance(value, str) and value and action == "scan" and not project:
+            project = value
+        elif isinstance(value, dict):
+            action = value.get("action", action)
+            project = value.get("project", project)
+            if format is None and "format" in value:
+                format = value.get("format")
+            if lang is None and "lang" in value:
+                lang = value.get("lang")
+            if schedule is None and "schedule" in value:
+                schedule = value.get("schedule")
+            if model is None and "model" in value:
+                model = value.get("model")
+            if provider is None and "provider" in value:
+                provider = value.get("provider")
+            if "apply" in value:
+                apply = value.get("apply")
+    action = str(action or "scan").strip().lower()
+    mod = _sibling("setup_audit")
+    language = _active_language(lang)
+    path = data_dir() / "review.json"
+    if action == "model":
+        updates = {}
+        if model is not None:
+            updates["model"] = model
+        if provider is not None:
+            updates["provider"] = provider
+        state = mod.set_fields(path, **updates)
+        return {"ok": True, "text": mod.describe_model(state, language), "state": state}
+    if action == "provider":
+        state = mod.set_fields(path, provider="" if provider is None else provider)
+        return {"ok": True, "text": mod.describe_model(state, language), "state": state}
+    if action == "project":
+        state = mod.set_fields(path, project="" if not project else project)
+        if state.get("project"):
+            text = (
+                f"Projet : {state['project']}." if language == "fr"
+                else f"Project: {state['project']}."
+            )
+        else:
+            text = "Projet retiré." if language == "fr" else "Project cleared."
+        return {"ok": True, "text": text, "state": state}
+    if action == "schedule":
+        return mod.apply_schedule(path, schedule or "", _run_cron, language)
+    saved = mod.load_state(path)
+    if not project and saved.get("project"):
+        project = saved["project"]
+    data = mod.scan(hermes_home(), project=project or None, lang=language)
+    data["review"] = saved
+    data["text"] = mod.render_text(data)
+    data["markdown"] = mod.render_markdown(data)
+    extra = ""
+    if action == "review":
+        data["apply"] = bool(apply)
+        extra = mod.brief(data, apply=bool(apply))
+        data["brief"] = extra
+        data["text"] = data["text"] + "\n\n" + extra
+        data["markdown"] = data["markdown"] + "\n\n" + extra
+    data["html"] = mod.render_html(data, extra=extra)
+    return data
+
+
+_REVIEW_HELP = (
+    "Usage: /gauge review  |  /gauge review apply\n"
+    "/gauge review model <id>  |  /gauge review provider <name>\n"
+    "/gauge review project <path>  |  /gauge review project off\n"
+    "/gauge review schedule 24h 03:00 Europe/Paris  |  /gauge review schedule off"
+)
+
+
+def _slash_setup(words):
+    kind, project = None, None
+    for word in words:
+        lowered = word.lower()
+        if lowered in ("md", "markdown", "json", "text", "txt", "html"):
+            kind = {"markdown": "md", "text": "txt"}.get(lowered, lowered)
+        else:
+            project = word
+    return _emit_setup(gauge_setup(action="scan", project=project, format=kind), kind)
+
+
+def _slash_review(words):
+    if not words:
+        return _emit_setup(gauge_setup(action="review"), "md")
+    head = words[0].lower()
+    if head in ("md", "markdown", "json", "text", "txt", "html"):
+        kind = {"markdown": "md", "text": "txt"}.get(head, head)
+        return _emit_setup(gauge_setup(action="review", format=kind), kind)
+    if head == "apply":
+        kind = "md"
+        for word in words[1:]:
+            lowered = word.lower()
+            if lowered in ("md", "markdown", "json", "text", "txt", "html"):
+                kind = {"markdown": "md", "text": "txt"}.get(lowered, lowered)
+        return _emit_setup(gauge_setup(action="review", apply=True, format=kind), kind)
+    if head == "schedule":
+        return gauge_setup(action="schedule", schedule=" ".join(words[1:])).get("text") or ""
+    if head == "model":
+        model = words[1] if len(words) > 1 else "default"
+        provider = None
+        if len(words) > 3 and words[2].lower() == "provider":
+            provider = words[3]
+        return gauge_setup(action="model", model=model, provider=provider).get("text") or ""
+    if head == "provider":
+        provider = words[1] if len(words) > 1 else "default"
+        return gauge_setup(action="provider", provider=provider).get("text") or ""
+    if head == "project":
+        project = " ".join(words[1:]) if len(words) > 1 else "off"
+        return gauge_setup(action="project", project=project).get("text") or ""
+    return _REVIEW_HELP
+
+
 def gauge_slash(raw_args="", session_id=None, **_kwargs):
     """``/gauge`` for this session, ``/gauge report`` (or md, json) for every session,
-    ``/gauge audit`` for peaks and compactions, ``/gauge incidents`` for the incident
-    report page, ``/gauge config`` for the preferences."""
+    ``/gauge audit`` for peaks and compactions, ``/gauge setup`` for the context
+    checklist, ``/gauge review`` for the model pass, ``/gauge incidents`` for the
+    incident report page, ``/gauge config`` for the preferences."""
     original = (raw_args or "").strip()
     head, _space, tail = original.partition(" ")
+    if head.lower() == "setup":
+        return _slash_setup(tail.split())
+    if head.lower() == "review":
+        return _slash_review(tail.split())
     if head.lower() == "config":
         return _slash_config(tail.strip())
     if head.lower() == "window":

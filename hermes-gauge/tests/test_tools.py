@@ -665,7 +665,10 @@ def test_manifest_lists_the_hooks_and_leaves_the_demo_out():
     root = Path(__file__).resolve().parents[2]
     manifest = (root / "plugin.yaml").read_text(encoding="utf-8")
     nested = (root / "hermes-gauge" / "plugin.yaml").read_text(encoding="utf-8")
-    for name in ("gauge_check", "gauge_report", "gauge_set_window", "gauge_render", "gauge_action"):
+    for name in (
+        "gauge_check", "gauge_report", "gauge_set_window", "gauge_render",
+        "gauge_action", "gauge_setup",
+    ):
         assert name in manifest
         assert name in nested
     for hook in (
@@ -710,13 +713,13 @@ def test_root_entry_registers_the_same_hooks():
     module.register(ctx)
     assert ctx.tools == [
         "gauge_check", "gauge_report", "gauge_set_window", "gauge_render",
-        "gauge_action",
+        "gauge_action", "gauge_setup",
     ]
     assert ctx.commands == ["gauge"]
     assert "post_llm_call" in ctx.hooks
     assert "post_compaction" in ctx.hooks
     assert "on_stream_end" in ctx.hooks
-    assert ctx.skills == ["gauge-viewer"]
+    assert ctx.skills == ["gauge-context-review", "gauge-viewer"]
 
 
 def _capture_alerts(monkeypatch):
@@ -2984,3 +2987,47 @@ def test_outside_hermes_the_environment_is_the_only_fallback(monkeypatch, tmp_pa
     monkeypatch.setitem(sys.modules, "hermes_constants", None)  # import raises ImportError
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "from-env"))
     assert tools._sibling("prefs").hermes_home() == tmp_path / "from-env"
+
+
+def test_slash_setup_and_review_do_not_edit_files(tmp_path, monkeypatch):
+    monkeypatch.setattr(tools, "_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(tools, "_DATA_DIR", tmp_path / "data")
+    spawned = []
+    monkeypatch.setattr(
+        tools, "_CRON_RUNNER",
+        lambda argv: spawned.append(argv) or (0, "Created job: abcdef12\n"),
+    )
+    (tmp_path / "memories").mkdir()
+    (tmp_path / "memories" / "MEMORY.md").write_text(
+        "One durable fact about the workspace.", encoding="utf-8",
+    )
+
+    text = tools.gauge_slash("setup")
+    assert text.startswith("# Hermes Gauge — Context setup —")
+    assert tools.gauge_slash("setup txt").startswith("Context setup —")
+    assert tools.gauge_slash("setup html").lstrip().startswith("<!DOCTYPE html>")
+    assert spawned == []
+    review = tools.gauge_slash("review")
+    assert "Report only" in review
+    assert "Do not edit any file" in review
+    applied = tools.gauge_slash("review apply")
+    assert "You may edit only" in applied
+
+    pinned = tools.gauge_slash("review model z-ai/glm-5.3-flash provider openrouter")
+    assert "z-ai/glm-5.3-flash" in pinned
+    assert "openrouter" in pinned
+    scheduled = tools.gauge_slash("review schedule 24h 03:00 Europe/Paris")
+    assert "Review scheduled" in scheduled
+    assert spawned and spawned[0][0] == "hermes"
+    saved = json.loads((tmp_path / "data" / "review.json").read_text(encoding="utf-8"))
+    assert saved["job_id"] == "abcdef12"
+    assert saved["model"] == "z-ai/glm-5.3-flash"
+
+
+def test_gauge_setup_returns_the_checklist_without_calling_doctor(tmp_path, monkeypatch):
+    monkeypatch.setattr(tools, "_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(tools, "_DATA_DIR", tmp_path / "data")
+    result = tools.gauge_setup({"action": "scan"})
+    assert result["status"] == "OK"
+    assert "text" in result and "markdown" in result
+    assert "doctor" not in result
