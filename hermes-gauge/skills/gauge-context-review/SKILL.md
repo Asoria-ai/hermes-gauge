@@ -78,7 +78,7 @@ The measurement uses no model. The written review uses the profile default unles
 - Codex only: provider `openai-codex`, model left empty.
 - Claude only: provider `anthropic`, a Sonnet-class model they already use.
 
-The user sets this with `/gauge review model` and `/gauge review provider`. A nightly job is `/gauge review schedule 24h 03:00 Europe/Paris` (also `12h`, `every 6h`, `every 2d`). `off` removes it. The job writes a file. It does not post to Telegram. Whether it splits is `memory.review_mode`: `report` (default) or `split`.
+Only the user sets this, with the `/gauge review` slash command. The `gauge_setup` tool refuses `schedule`, `model`, `provider` and `project`: do not try to create, edit or re-schedule a job, and do not pick a model. A nightly job is `/gauge review schedule 24h 03:00 Europe/Paris` (also `12h`, `every 6h`, `every 2d`). `off` removes it. The job writes a file. It does not post to Telegram. Whether it splits is `memory.review_mode`: `report` (default) or `split`.
 
 ## Telegram
 

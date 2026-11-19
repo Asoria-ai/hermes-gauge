@@ -3054,3 +3054,38 @@ def test_the_scheduled_review_reads_its_mode_from_the_preferences(tmp_path, monk
     assert skill.read_text(encoding="utf-8").count("word") == 20_000
 
     assert tools.gauge_slash("memory").startswith("# Hermes Gauge — Context setup —")
+
+
+def test_the_tool_cannot_schedule_or_pick_a_model_but_the_slash_command_can(tmp_path, monkeypatch):
+    monkeypatch.setattr(tools, "_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(tools, "_DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(tools, "_CONFIG_PATH", tmp_path / "gauge.yaml")
+    spawned = []
+    monkeypatch.setattr(
+        tools, "_CRON_RUNNER",
+        lambda argv: spawned.append(argv) or (0, "Created job: abcdef12\n"),
+    )
+
+    GAUGE_SETUP = _load_schemas().GAUGE_SETUP
+    assert GAUGE_SETUP["parameters"]["properties"]["action"]["enum"] == ["scan", "review"]
+    for name in ("schedule", "model", "provider"):
+        assert name not in GAUGE_SETUP["parameters"]["properties"]
+
+    for call in (
+        {"action": "schedule", "schedule": "24h 03:00 Europe/Paris"},
+        {"action": "model", "model": "z-ai/glm-5.3-flash", "provider": "openrouter"},
+        {"action": "provider", "provider": "anthropic"},
+        {"action": "project", "project": str(tmp_path)},
+    ):
+        refused = tools.gauge_setup(call)
+        assert refused["ok"] is False and refused["error"] == "user_only"
+    assert spawned == []
+    assert not (tmp_path / "data" / "review.json").exists()
+
+    # A scheduled run asks for a brief and nothing else; it still works.
+    assert "brief" in tools.gauge_setup({"action": "review", "scheduled": True})
+
+    assert "Review scheduled" in tools.gauge_slash("review schedule 24h 03:00 Europe/Paris")
+    assert spawned and spawned[0][:3] == ["hermes", "cron", "create"]
+    pinned = tools.gauge_slash("review model z-ai/glm-5.3-flash provider openrouter")
+    assert "z-ai/glm-5.3-flash" in pinned

@@ -2437,38 +2437,14 @@ def _setup_limits():
         return None
 
 
-def gauge_setup(*args, action="scan", project=None, format=None, lang=None,
-                schedule=None, model=None, provider=None, apply=False,
-                scheduled=False, **kwargs):
-    """Checklist of what is pasted every turn, or the review schedule around it.
+# Settings that become flags on the review's cron job. They are changed from the
+# /gauge review slash command only. Hermes keeps per-job model, provider, workdir
+# and scheduling away from the agent on purpose, so the gauge_setup tool refuses them.
+_REVIEW_SETTINGS = ("schedule", "model", "provider", "project")
 
-    ``scan`` measures and writes nothing. ``review`` adds instructions for a
-    model; ``apply`` widens them to the skills on the split plan. A
-    ``scheduled`` review may edit only when ``memory.review_mode`` is ``split``.
-    ``schedule`` creates a Hermes cron job. This function never calls a model
-    and never edits a skill.
-    """
-    for value in args:
-        if isinstance(value, str) and value and action == "scan" and not project:
-            project = value
-        elif isinstance(value, dict):
-            action = value.get("action", action)
-            project = value.get("project", project)
-            if format is None and "format" in value:
-                format = value.get("format")
-            if lang is None and "lang" in value:
-                lang = value.get("lang")
-            if schedule is None and "schedule" in value:
-                schedule = value.get("schedule")
-            if model is None and "model" in value:
-                model = value.get("model")
-            if provider is None and "provider" in value:
-                provider = value.get("provider")
-            if "apply" in value:
-                apply = value.get("apply")
-            if "scheduled" in value:
-                scheduled = value.get("scheduled")
-    action = str(action or "scan").strip().lower()
+
+def _review_settings(action, *, project=None, schedule=None, model=None, provider=None, lang=None):
+    """Change the review job's settings. Called by the slash command, never by the tool."""
     mod = _sibling("setup_audit")
     language = _active_language(lang)
     path = data_dir() / "review.json"
@@ -2493,8 +2469,45 @@ def gauge_setup(*args, action="scan", project=None, format=None, lang=None,
         else:
             text = "Projet retiré." if language == "fr" else "Project cleared."
         return {"ok": True, "text": text, "state": state}
-    if action == "schedule":
-        return mod.apply_schedule(path, schedule or "", _run_cron, language)
+    return mod.apply_schedule(path, schedule or "", _run_cron, language)
+
+
+def gauge_setup(*args, action="scan", project=None, format=None, lang=None,
+                apply=False, scheduled=False, **kwargs):
+    """Checklist of what is pasted every turn, plus the review brief.
+
+    ``scan`` measures and writes nothing. ``review`` adds instructions for a
+    model; ``apply`` widens them to the skills on the split plan. A
+    ``scheduled`` review may edit only when ``memory.review_mode`` is ``split``.
+    This function never calls a model, never edits a skill, and never creates or
+    changes a cron job: the schedule, model, provider and project are set with
+    the ``/gauge review`` slash command only.
+    """
+    for value in args:
+        if isinstance(value, str) and value and action == "scan" and not project:
+            project = value
+        elif isinstance(value, dict):
+            action = value.get("action", action)
+            project = value.get("project", project)
+            if format is None and "format" in value:
+                format = value.get("format")
+            if lang is None and "lang" in value:
+                lang = value.get("lang")
+            if "apply" in value:
+                apply = value.get("apply")
+            if "scheduled" in value:
+                scheduled = value.get("scheduled")
+    action = str(action or "scan").strip().lower()
+    mod = _sibling("setup_audit")
+    language = _active_language(lang)
+    path = data_dir() / "review.json"
+    if action in _REVIEW_SETTINGS:
+        text = (
+            "Cette action n'est pas disponible pour l'agent. L'utilisateur la lance avec /gauge review "
+            f"{action}." if language == "fr" else
+            f"The agent cannot do this. The user sets the review {action} with /gauge review {action}."
+        )
+        return {"ok": False, "error": "user_only", "text": text}
     saved = mod.load_state(path)
     if not project and saved.get("project"):
         project = saved["project"]
@@ -2548,19 +2561,19 @@ def _slash_review(words):
                 kind = {"markdown": "md", "text": "txt"}.get(lowered, lowered)
         return _emit_setup(gauge_setup(action="review", apply=True, format=kind), kind)
     if head == "schedule":
-        return gauge_setup(action="schedule", schedule=" ".join(words[1:])).get("text") or ""
+        return _review_settings("schedule", schedule=" ".join(words[1:])).get("text") or ""
     if head == "model":
         model = words[1] if len(words) > 1 else "default"
         provider = None
         if len(words) > 3 and words[2].lower() == "provider":
             provider = words[3]
-        return gauge_setup(action="model", model=model, provider=provider).get("text") or ""
+        return _review_settings("model", model=model, provider=provider).get("text") or ""
     if head == "provider":
         provider = words[1] if len(words) > 1 else "default"
-        return gauge_setup(action="provider", provider=provider).get("text") or ""
+        return _review_settings("provider", provider=provider).get("text") or ""
     if head == "project":
         project = " ".join(words[1:]) if len(words) > 1 else "off"
-        return gauge_setup(action="project", project=project).get("text") or ""
+        return _review_settings("project", project=project).get("text") or ""
     return _REVIEW_HELP
 
 

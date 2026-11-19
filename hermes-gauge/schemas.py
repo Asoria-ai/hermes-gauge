@@ -137,38 +137,25 @@ GAUGE_SETUP = {
         "review with apply true allows splitting the skills on the split plan only. "
         "review with scheduled true is the cron run; it may split only when "
         "memory.review_mode is split. "
-        "schedule saves a Hermes cron (24h 03:00 Europe/Paris, 12h, every 6h, "
-        "every 2d, or off). model and provider pin the review model; empty "
-        "keeps the profile default."
+        "It cannot create or change a cron job and cannot pick a model or "
+        "provider: the user does that with the /gauge review slash command."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["scan", "review", "schedule", "model", "provider", "project"],
-                "description": "scan (default), review, schedule, model, provider, or project.",
+                "enum": ["scan", "review"],
+                "description": "scan (default) or review.",
             },
             "project": {
                 "type": "string",
-                "description": "Project directory whose AGENTS.md is measured. Pass off to clear a saved path.",
+                "description": "Project directory whose AGENTS.md is measured. Read only; nothing is saved.",
             },
             "format": {
                 "type": "string",
                 "enum": ["md", "txt", "html", "json"],
                 "description": "md (default), txt, html, or json. /gauge setup is markdown.",
-            },
-            "schedule": {
-                "type": "string",
-                "description": "24h 03:00 Europe/Paris, 12h, every 6h, every 2d, or off.",
-            },
-            "model": {
-                "type": "string",
-                "description": "Review model id. default clears the pin and uses the profile model.",
-            },
-            "provider": {
-                "type": "string",
-                "description": "openai-codex, anthropic, openrouter, or default to clear.",
             },
             "apply": {
                 "type": "boolean",
